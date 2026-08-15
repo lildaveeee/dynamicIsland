@@ -1,0 +1,21 @@
+# Examples:
+#   firstNotch  = [Date, Cava, Time]
+#   secondNotch = [Workspaces]
+#   thirdNotch  = [Timer]
+
+firstNotch  = [Date, Cava, Time]
+secondNotch = [Workspaces]
+thirdNotch  = [Timer]
+
+# Valid actions: music, controlPanel, notifHistory, appLauncher, none
+
+clickLeft   = music
+clickRight  = controlPanel
+clickMiddle = notifHistory
+dragDown    = appLauncher
+
+pillColor   = #000000
+pillOpacity = 1
+accentColor = #2196F3
+textColor   = #E4E0D8
+fontFamily  = Adwaita Mono
