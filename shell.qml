@@ -14,18 +14,22 @@ ShellRoot {
         property string clickLeft:   "music"
         property string clickRight:  "controlPanel"
         property string clickMiddle: "notifHistory"
-        property string dragDown:    "appLauncher"
+        property string dragDown:      "appLauncher"
+        property string dragDownRight: "screenTime"
 
         function doClickAction(action) {
             if (action === "none" || action === "") return
             if (action === "appLauncher") {
-
                 root.appLauncherQuery = ""
                 appLauncherModel.clear()
                 root.appLauncherOpen = true
                 root.islandState = "appLauncher"
                 appLauncherLoader.running = false
                 appLauncherLoader.running = true
+            } else if (action === "screenTime") {
+                root.islandState = "screenTime"
+                root.screenTimeOpen = true
+                root.refreshPlaytimeModel()
             } else {
                 root.islandState = (root.islandState === action) ? "default" : action
             }
@@ -46,6 +50,22 @@ ShellRoot {
             var c = Qt.color(root.pillColor)
             return Qt.rgba(c.r, c.g, c.b, (extraAlpha !== undefined ? extraAlpha : 1.0) * root.pillOpacity)
         }
+
+        function arcColor(pct) {
+            if (pct < 60) return root.textColor
+            if (pct < 85) return "#F5A623"
+            return "#FF5F5F"
+        }
+        // ── Per-monitor scaling ─────────────────────────────────────────
+        // Hyprland.focusedMonitor updates whenever focus moves to a different
+        // screen (including via ctrl+space toggling the island on another
+        // monitor). height/scale gives logical pixels; 1080 is the baseline.
+        readonly property real uiScale: {
+            var m = Hyprland.focusedMonitor
+            if (!m || m.height <= 0 || m.scale <= 0) return 1.0
+            return (m.height / m.scale) / 1080.0
+        }
+
         property string currentTime: Qt.formatDateTime(new Date(), "HH:mm")
         property string currentDate: Qt.formatDateTime(new Date(), "ddd, d MMM")
 	property var    cavaBars: []
@@ -103,105 +123,7 @@ ShellRoot {
         Process {
             id: dunstSetup
             running: true
-            command: ["bash", "-c",
-                "FIFO=/tmp/quickshell-notif.fifo; " +
-                "rm -f \"$FIFO\"; mkfifo \"$FIFO\"; " +
-                "DIR=\"$HOME/.config/dunst\"; mkdir -p \"$DIR\"; " +
-
-                "cat > \"$DIR/notify-hook.sh\" << 'HOOKEOF'\n" +
-                "#!/bin/bash\n" +
-                "ICON=\"$DUNST_ICON_PATH\"\n" +
-                "# Resolve a bare icon name to a real file path.\n" +
-                "# Strategy: prefer 48px PNG, then 32px, then any size, then SVG.\n" +
-                "resolve_icon() {\n" +
-                "  local name=\"$1\"\n" +
-                "  local dirs=\"$HOME/.local/share/icons /usr/share/icons /usr/share/pixmaps\"\n" +
-                "  # Try preferred sizes first: 48, 32, 64, 256, scalable\n" +
-                "  for size in 48 32 64 128 256 22 16 scalable; do\n" +
-                "    for base in $dirs; do\n" +
-                "      for ext in png svg xpm; do\n" +
-                "        local candidate\n" +
-                "        # hicolor/<size>x<size>/apps/<name>.<ext>\n" +
-                "        candidate=\"$base/hicolor/${size}x${size}/apps/${name}.${ext}\"\n" +
-                "        [ -f \"$candidate\" ] && { echo \"$candidate\"; return; }\n" +
-                "        # Any theme that has the right size subfolder\n" +
-                "        for theme in Papirus Papirus-Dark breeze breeze-dark Adwaita hicolor; do\n" +
-                "          candidate=\"$base/$theme/${size}x${size}/apps/${name}.${ext}\"\n" +
-                "          [ -f \"$candidate\" ] && { echo \"$candidate\"; return; }\n" +
-                "        done\n" +
-                "      done\n" +
-                "    done\n" +
-                "    # scalable folder uses different naming\n" +
-                "    for base in $dirs; do\n" +
-                "      for theme in hicolor Papirus breeze Adwaita; do\n" +
-                "        for ext in svg png; do\n" +
-                "          local candidate=\"$base/$theme/scalable/apps/${name}.${ext}\"\n" +
-                "          [ -f \"$candidate\" ] && { echo \"$candidate\"; return; }\n" +
-                "        done\n" +
-                "      done\n" +
-                "    done\n" +
-                "  done\n" +
-                "  # Broad fallback: find anywhere under icon dirs\n" +
-                "  find $dirs /usr/share/pixmaps -type f \\\n" +
-                "    \\( -name \"${name}.png\" -o -name \"${name}.svg\" \\) \\\n" +
-                "    2>/dev/null | head -1\n" +
-                "}\n" +
-                "if [ -n \"$ICON\" ] && [ \"${ICON#/}\" = \"$ICON\" ]; then\n" +
-                "  # Bare icon name — resolve it\n" +
-                "  RESOLVED=$(resolve_icon \"$ICON\")\n" +
-                "  if [ -z \"$RESOLVED\" ]; then\n" +
-                "    # Try lowercase app name as icon name\n" +
-                "    ALT=$(echo \"$DUNST_APP_NAME\" | tr '[:upper:]' '[:lower:]' | tr ' ' '-')\n" +
-                "    RESOLVED=$(resolve_icon \"$ALT\")\n" +
-                "  fi\n" +
-                "  [ -n \"$RESOLVED\" ] && ICON=\"$RESOLVED\"\n" +
-                "elif [ -z \"$ICON\" ] && [ -n \"$DUNST_APP_NAME\" ]; then\n" +
-                "  # No icon at all — try to find one from the app name\n" +
-                "  ALT=$(echo \"$DUNST_APP_NAME\" | tr '[:upper:]' '[:lower:]' | tr ' ' '-')\n" +
-                "  ICON=$(resolve_icon \"$ALT\")\n" +
-                "fi\n" +
-                "# Extract a URL from the notification body or summary.\n" +
-                "# Priority: <a href=\"URL\">, bare https://, bare http://\n" +
-                "extract_url() {\n" +
-                "  local text=\"$1\"\n" +
-                "  # href attribute in an anchor tag\n" +
-                "  local u\n" +
-                "  u=$(echo \"$text\" | grep -oP 'href=[\"\\x27]\\K[^\"\\x27]+' | head -1)\n" +
-                "  [ -n \"$u\" ] && { echo \"$u\"; return; }\n" +
-                "  # bare URL starting with https:// or http://\n" +
-                "  u=$(echo \"$text\" | grep -oP 'https?://[^\\s<>\"\\x27]+' | head -1)\n" +
-                "  [ -n \"$u\" ] && { echo \"$u\"; return; }\n" +
-                "}\n" +
-                "NOTIF_URL=$(printf '%s' \"$DUNST_URLS\" | head -1 | tr -d '\\r')\n" +
-                "[ -z \"$NOTIF_URL\" ] && NOTIF_URL=$(extract_url \"$DUNST_BODY\")\n" +
-                "[ -z \"$NOTIF_URL\" ] && NOTIF_URL=$(extract_url \"$DUNST_SUMMARY\")\n" +
-                "printf '%s\\x1f%s\\x1f%s\\x1f%s\\x1f%s\\x1f%s\\n' \"$DUNST_SUMMARY\" \"$DUNST_BODY\" \"$DUNST_APP_NAME\" \"$ICON\" \"$DUNST_DESKTOP_ENTRY\" \"$NOTIF_URL\" > /tmp/quickshell-notif.fifo\n" +
-                "HOOKEOF\n" +
-                "chmod +x \"$DIR/notify-hook.sh\"; " +
-
-                "RC=\"$HOME/.config/dunst/dunstrc\"; " +
-                "mkdir -p \"$(dirname \"$RC\")\"; " +
-                "[ ! -f \"$RC\" ] && cp /etc/dunst/dunstrc \"$RC\" 2>/dev/null || touch \"$RC\"; " +
-                "if ! grep -q 'notify-hook' \"$RC\"; then " +
-                "  sed -i '/^\\[global\\]/a script = ~/.config/dunst/notify-hook.sh' \"$RC\"; " +
-                "fi; " +
-                "add_or_replace() { " +
-                "  local key=\"$1\" val=\"$2\"; " +
-                "  if grep -qE \"^\\s*${key}\\s*=\" \"$RC\"; then " +
-                "    sed -i \"s|^\\s*${key}\\s*=.*|    ${key} = ${val}|\" \"$RC\"; " +
-                "  else " +
-                "    sed -i \"/^\\[global\\]/a \\    ${key} = ${val}\" \"$RC\"; " +
-                "  fi; " +
-                "}; " +
-                "add_or_replace offset            '0x-2000'; " +
-                "add_or_replace transparency      '100'; " +
-                "add_or_replace width             '0'; " +
-                "add_or_replace height            '0'; " +
-                "add_or_replace always_run_script 'true'; " +
-                "dunstctl reload 2>/dev/null || true; " +
-                "dunstctl history-clear 2>/dev/null || true; " +
-                "exec tail -f \"$FIFO\""
-            ]
+            command: ["bash", Qt.resolvedUrl("./scripts/dunst-setup.sh").toString().replace("file://", "")]
             stdout: SplitParser {
                 splitMarker: "\n"
                 onRead: data => {
@@ -257,7 +179,12 @@ ShellRoot {
             }
         }
 
-        Process { id: historySaveProcess; command: [] }
+        Process {
+            id: historySaveProcess
+            property string payload: ""
+            command: ["bash", Qt.resolvedUrl("./scripts/notif-history-save.sh").toString().replace("file://", "")]
+            environment: ({ "NOTIF_HISTORY_PAYLOAD": payload })
+        }
 
         function saveHistory() {
             var lines = []
@@ -270,18 +197,13 @@ ShellRoot {
                 }))
             }
             var payload = lines.join("\n")
-            historySaveProcess.command = ["bash", "-c",
-                "mkdir -p \"$HOME/.local/share/quickshell\" && " +
-                "printf '%s' " + JSON.stringify(payload) +
-                " > \"$HOME/.local/share/quickshell/notif-history.ndjson\""]
+            historySaveProcess.payload = payload
             historySaveProcess.running = true
         }
 
         Process {
             id: historyLoadProcess
-            command: ["bash", "-c",
-                "f=\"$HOME/.local/share/quickshell/notif-history.ndjson\"; " +
-                "[ -f \"$f\" ] && cat \"$f\" || true"]
+            command: ["bash", Qt.resolvedUrl("./scripts/notif-history-load.sh").toString().replace("file://", "")]
             running: true
             stdout: SplitParser {
                 splitMarker: "\n"
@@ -350,53 +272,7 @@ ShellRoot {
         Process {
             id: appLauncherLoader
             running: false
-            command: ["bash", "-c",
-                "resolve_icon() {\n" +
-                "  local name=\"$1\"\n" +
-                "  [ -z \"$name\" ] && return\n" +
-                "  if [ \"${name#/}\" != \"$name\" ]; then [ -f \"$name\" ] && echo \"$name\"; return; fi\n" +
-                "  local dirs=\"$HOME/.local/share/icons /usr/share/icons /usr/share/pixmaps\"\n" +
-                "  for size in 48 32 64 128 256 22 16; do\n" +
-                "    for theme in hicolor Papirus Papirus-Dark breeze breeze-dark Adwaita; do\n" +
-                "      for base in $dirs; do\n" +
-                "        for ext in png svg xpm; do\n" +
-                "          local c=\"$base/$theme/${size}x${size}/apps/${name}.${ext}\"\n" +
-                "          [ -f \"$c\" ] && { echo \"$c\"; return; }\n" +
-                "        done\n" +
-                "      done\n" +
-                "    done\n" +
-                "    for theme in hicolor Papirus breeze Adwaita; do\n" +
-                "      for base in $dirs; do\n" +
-                "        for ext in svg png; do\n" +
-                "          local c=\"$base/$theme/scalable/apps/${name}.${ext}\"\n" +
-                "          [ -f \"$c\" ] && { echo \"$c\"; return; }\n" +
-                "        done\n" +
-                "      done\n" +
-                "    done\n" +
-                "  done\n" +
-                "  for ext in png svg xpm; do\n" +
-                "    local c=\"/usr/share/pixmaps/${name}.${ext}\"\n" +
-                "    [ -f \"$c\" ] && { echo \"$c\"; return; }\n" +
-                "  done\n" +
-                "  find /usr/share/icons /usr/share/pixmaps $HOME/.local/share/icons -type f \\( -name \"${name}.png\" -o -name \"${name}.svg\" \\) 2>/dev/null | head -1\n" +
-                "}\n" +
-                "find /usr/share/applications ~/.local/share/applications -name '*.desktop' 2>/dev/null | sort -u | " +
-                "while IFS= read -r f; do " +
-                "  name=$(grep -m1 '^Name=' \"$f\" | cut -d= -f2-); " +
-                "  exec=$(grep -m1 '^Exec=' \"$f\" | cut -d= -f2- | sed 's/ *%[uUfFdDnNickvm]//g' | xargs); " +
-                "  nodisp=$(grep -m1 '^NoDisplay=' \"$f\" | cut -d= -f2-); " +
-                "  hidden=$(grep -m1 '^Hidden=' \"$f\" | cut -d= -f2-); " +
-                "  icon=$(grep -m1 '^Icon=' \"$f\" | cut -d= -f2-); " +
-                "  [ \"$nodisp\" = 'true' ] && continue; " +
-                "  [ \"$hidden\" = 'true' ] && continue; " +
-                "  [ -z \"$name\" ] && continue; " +
-                "  [ -z \"$exec\" ] && continue; " +
-                "  did=$(basename \"$f\" .desktop); " +
-                "  resolved=$(resolve_icon \"$icon\"); " +
-                "  [ -z \"$resolved\" ] && resolved=\"$icon\"; " +
-                "  printf '%s\\x1f%s\\x1f%s\\x1f%s\\n' \"$name\" \"$exec\" \"$did\" \"$resolved\"; " +
-                "done | sort -t$'\\x1f' -k1,1 -f"
-            ]
+            command: ["bash", Qt.resolvedUrl("./scripts/app-launcher.sh").toString().replace("file://", "")]
             stdout: SplitParser {
                 splitMarker: "\n"
                 onRead: data => {
@@ -410,9 +286,10 @@ ShellRoot {
         Process { id: appLaunchProc; running: false; command: [] }
 
         function launchApp(desktopId, exec) {
-            appLaunchProc.command = ["bash", "-c",
-                "gtk-launch " + desktopId + " 2>/dev/null || " +
-                "nohup sh -c " + JSON.stringify(exec) + " &>/dev/null &"
+            appLaunchProc.command = [
+                "bash",
+                Qt.resolvedUrl("./scripts/app-launch.sh").toString().replace("file://", ""),
+                desktopId, exec
             ]
             appLaunchProc.running = false
             appLaunchProc.running = true
@@ -422,13 +299,19 @@ ShellRoot {
 
         readonly property string favsFile: configDir + "/favourites"
 
-        Process { id: favsSaveProc; running: false; command: [] }
-        function saveFavourites() {
-            favsSaveProc.command = ["bash", "-c",
-                "mkdir -p " + JSON.stringify(root.configDir) + " && " +
-                "printf '%s\\n' " + JSON.stringify(appFavourites.join("\n")) +
-                " > " + JSON.stringify(root.favsFile)
+        Process {
+            id: favsSaveProc
+            running: false
+            property string favsPayload: ""
+            command: [
+                "bash",
+                Qt.resolvedUrl("./scripts/favs-save.sh").toString().replace("file://", ""),
+                root.configDir, root.favsFile
             ]
+            environment: ({ "FAVS_PAYLOAD": favsPayload })
+        }
+        function saveFavourites() {
+            favsSaveProc.favsPayload = appFavourites.join("\n")
             favsSaveProc.running = false
             favsSaveProc.running = true
         }
@@ -436,8 +319,10 @@ ShellRoot {
         Process {
             id: favsLoadProc
             running: true
-            command: ["bash", "-c",
-                "f=" + JSON.stringify(root.favsFile) + "; [ -f \"$f\" ] && cat \"$f\" || true"
+            command: [
+                "bash",
+                Qt.resolvedUrl("./scripts/favs-load.sh").toString().replace("file://", ""),
+                root.favsFile
             ]
             stdout: SplitParser {
                 splitMarker: "\n"
@@ -458,8 +343,14 @@ ShellRoot {
         property real   volume:           0.8
         property string wifiStatus:       "No device"
         property string bluetoothStatus:  "Unavailable"
-        property bool soundAppsOpen: false
-        property bool wifiNetworksOpen: false
+        property bool   soundAppsOpen:     false
+        property bool   wifiNetworksOpen:  false
+        property bool   colorWheelOpen:    false
+        property string colorWheelTarget:  "pill"
+        onIslandStateChanged: {
+            if (islandState !== "settings")     colorWheelOpen    = false
+            if (islandState !== "controlPanel") vpnLocationsOpen  = false
+        }
         property bool silenced: false
         property string wifiConnectingTo: ""
         property string wifiConnectedSsid: ""
@@ -467,6 +358,387 @@ ShellRoot {
         ListModel { id: wifiNetworkModel }
         ListModel { id: notifHistory }
         ListModel { id: appLauncherModel }
+        ListModel { id: playtimeModel }
+
+        // ── Screen Time ────────────────────────────────────────────────
+        property bool   screenTimeOpen:        false
+        property string screenTimeSort:        "session"  // "session" or "total"
+        property var    steamNameCache:        ({})
+        property string steamIconHome:         ""
+        property var    steamIconCache:        ({})   // path → true, for files that exist
+
+        // Resolve $HOME once so icon path building doesn't need shell
+        Process {
+            id: homeResolver
+            running: true
+            command: ["bash", "-c", "echo \"$HOME\""]
+            stdout: SplitParser {
+                splitMarker: "\n"
+                onRead: data => { var h = data.trim(); if (h !== "") root.steamIconHome = h }
+            }
+            onExited: (exitCode, exitStatus) => {
+                steamIconScanner.running = false
+                steamIconScanner.running = true
+            }
+        }
+
+        // Scan all Steam librarycache + games dirs and record which icon files exist.
+        // Runs after homeResolver finishes (triggered from its onExited via steamIconScanner).
+        Process {
+            id: steamIconScanner
+            running: false
+            command: ["bash", Qt.resolvedUrl("./scripts/steam-icon-scan.sh").toString().replace("file://", "")]
+            stdout: SplitParser {
+                splitMarker: "\n"
+                onRead: data => {
+                    var p = data.trim()
+                    if (p === "") return
+                    var c = root.steamIconCache
+                    c[p] = true
+                    root.steamIconCache = c
+                }
+            }
+            onExited: (exitCode, exitStatus) => {
+                if (root.screenTimeOpen) root.refreshPlaytimeModel()
+            }
+        }
+
+        Process {
+            id: steamNameLoader
+            running: true
+            command: ["bash", Qt.resolvedUrl("./scripts/steam-names.sh").toString().replace("file://", "")]
+            stdout: SplitParser {
+                splitMarker: "\n"
+                onRead: data => {
+                    var p = data.trim().split("|")
+                    if (p.length >= 2 && p[0] !== "") {
+                        var cache = root.steamNameCache
+                        cache[p[0]] = p.slice(1).join("|")
+                        root.steamNameCache = cache
+                    }
+                }
+            }
+            // Once all manifests are read, re-populate the model so any
+            // steam_app_NNNNNN entries that were already recorded get their
+            // real names (fixes the race between startup tracking and cache load).
+            onExited: (exitCode, exitStatus) => {
+                if (root.screenTimeOpen) root.refreshPlaytimeModel()
+            }
+        }
+
+        // System uptime
+        property string systemUptimeStr:       "0s"
+        property real   systemUptimeMs:        0
+
+        // Total PC uptime ever (accumulated across boots, saved to disk)
+        property real   totalPcUptimeMs:       0
+        property string totalPcUptimeStr:      "0s"
+
+        // System overview (CPU / RAM / GPU)
+        property real   sysCpuPct:  0
+        property real   sysRamPct:  0
+        property real   sysGpuPct:  0
+
+        Timer {
+            interval: 2000; running: true; repeat: true
+            onTriggered: { sysOverviewPoller.running = false; sysOverviewPoller.running = true }
+        }
+
+        Process {
+            id: sysOverviewPoller
+            running: true
+            command: ["bash", Qt.resolvedUrl("./scripts/sys-overview.sh").toString().replace("file://", "")]
+            stdout: SplitParser {
+                splitMarker: "\n"
+                onRead: data => {
+                    var p = data.trim().split("|")
+                    if (p.length < 3) return
+                    var cpu = parseInt(p[0]); if (!isNaN(cpu)) root.sysCpuPct = Math.min(100, Math.max(0, cpu))
+                    var ram = parseInt(p[1]); if (!isNaN(ram)) root.sysRamPct = Math.min(100, Math.max(0, ram))
+                    var gpu = parseInt(p[2]); if (!isNaN(gpu)) root.sysGpuPct = Math.min(100, Math.max(0, gpu))
+                }
+            }
+        }
+
+        // Active window tracking
+        property string activeWindowClass:     ""
+        property real   activeWindowSince:     Date.now()
+
+        // playtime data: { [appClass]: { totalMs: number, sessionMs: number } }  (runtime: ms)
+        property var    playtimeData:          ({})
+
+        // Combined save file: { uptime: { totalS }, apps: { [class]: { totalS } } }  (on disk: seconds)
+        readonly property string screentimeFile: configDir + "/screentime.json"
+
+        function fmtDuration(ms) {
+            if (ms < 0) ms = 0
+            var s   = Math.floor(ms / 1000)
+            var m   = Math.floor(s / 60);   s = s % 60
+            var h   = Math.floor(m / 60);   m = m % 60
+            var d   = Math.floor(h / 24);   h = h % 24
+            if (d > 0) return d + "d " + h + "h"
+            if (h > 0) return h + "h " + (m < 10 ? "0" : "") + m + "m"
+            if (m > 0) return m + "m " + (s < 10 ? "0" : "") + s + "s"
+            return s + "s"
+        }
+
+        function recordWindowSwitch(newClass) {
+    		var now = Date.now()
+   		var prev = root.activeWindowClass
+    		var normNew = newClass.toLowerCase()
+    		if (prev !== "" && prev !== normNew) {
+        		var elapsed = now - root.activeWindowSince
+        		var d = root.playtimeData
+        		if (!d[prev]) d[prev] = { totalMs: 0, sessionMs: 0 }
+        		d[prev].totalMs   += elapsed
+        		d[prev].sessionMs += elapsed
+        		root.playtimeData = d
+    		}
+    		if (normNew === "steam_app_default") {
+        		steamAppResolver.running = false
+        		steamAppResolver.running = true
+        		root.activeWindowSince = now
+    		} else {
+        		root.activeWindowClass = normNew
+        		root.activeWindowSince = now
+    		}
+	}
+
+        function flushActiveWindow() {
+            var now = Date.now()
+            var cls = root.activeWindowClass.toLowerCase()
+            if (cls === "") return
+            var elapsed = now - root.activeWindowSince
+            var d = root.playtimeData
+            if (!d[cls]) d[cls] = { totalMs: 0, sessionMs: 0 }
+            d[cls].totalMs   += elapsed
+            d[cls].sessionMs += elapsed
+            root.playtimeData = d
+            root.activeWindowSince = now
+        }
+
+        function refreshPlaytimeModel() {
+            root.flushActiveWindow()
+            playtimeModel.clear()
+            var d = root.playtimeData
+            var keys = Object.keys(d)
+            keys.sort(function(a, b) {
+                var ka = d[a] || { totalMs: 0, sessionMs: 0 }
+                var kb = d[b] || { totalMs: 0, sessionMs: 0 }
+                return root.screenTimeSort === "session"
+                    ? kb.sessionMs - ka.sessionMs
+                    : kb.totalMs   - ka.totalMs
+            })
+            for (var i = 0; i < keys.length; i++) {
+                var k  = keys[i]
+                var e  = d[k] || { totalMs: 0, sessionMs: 0 }
+                var icon = ""
+                var displayName = k
+                var kl = k.toLowerCase()
+                // Try to match: desktopId exact, name exact, desktopId last segment (org.app.Name → name)
+                var kSegment = kl.indexOf(".") >= 0 ? kl.split(".").pop() : kl
+                for (var j = 0; j < appLauncherModel.count; j++) {
+                    var la = appLauncherModel.get(j)
+                    var did = (la.desktopId || "").toLowerCase()
+                    var nm  = (la.name      || "").toLowerCase()
+                    var didSeg = did.indexOf(".") >= 0 ? did.split(".").pop() : did
+                    if (did === kl || nm === kl || didSeg === kl || did === kSegment || didSeg === kSegment) {
+                        icon = la.icon || ""
+                        displayName = la.name || k
+                        break
+                    }
+                }
+                // Resolve steam_app_NNNNNN → real game name + icon from Steam cache
+                var steamMatch = k.match(/^steam_app_(\d+)$/i)
+                if (steamMatch) {
+                    var appId = steamMatch[1]
+                    if (displayName === k) {
+                        var gameName = root.steamNameCache[appId]
+                        if (gameName && gameName !== "") displayName = gameName
+                    }
+                    // Try Steam librarycache icon paths when no desktop icon was found
+                    if (icon === "") {
+                        var home = root.steamIconHome
+                        var candidates = [
+                            home + "/.local/share/Steam/appcache/librarycache/" + appId + "_icon.jpg",
+                            home + "/.steam/steam/appcache/librarycache/"       + appId + "_icon.jpg",
+                            home + "/.local/share/Steam/appcache/librarycache/" + appId + "_icon.png",
+                            home + "/.steam/steam/appcache/librarycache/"       + appId + "_icon.png",
+                            home + "/.local/share/Steam/steam/games/"           + appId + ".ico",
+                            home + "/.steam/steam/steam/games/"                 + appId + ".ico",
+                        ]
+                        for (var ci = 0; ci < candidates.length; ci++) {
+                            if (root.steamIconCache[candidates[ci]]) {
+                                icon = candidates[ci]
+                                break
+                            }
+                        }
+                    }
+                }
+                playtimeModel.append({
+                    appClass:    k,
+                    displayName: displayName,
+                    totalMs:     e.totalMs,
+                    sessionMs:   e.sessionMs,
+                    icon:        icon
+                })
+            }
+        }
+
+        // ── Combined screentime save / load ────────────────────────────
+        Process {
+            id: screentimeSaveProc
+            running: false
+            property string screentimePayload: ""
+            command: [
+                "bash",
+                Qt.resolvedUrl("./scripts/screentime-save.sh").toString().replace("file://", ""),
+                root.configDir, root.screentimeFile
+            ]
+            environment: ({ "SCREENTIME_PAYLOAD": screentimePayload })
+        }
+        function saveScreentimeData() {
+            root.flushActiveWindow()
+            var d    = root.playtimeData
+            var keys = Object.keys(d)
+            var apps = {}
+            for (var i = 0; i < keys.length; i++) {
+                var k = keys[i]
+                apps[k] = { totalS: Math.round(d[k].totalMs / 1000) }   // session resets each run; only save total
+            }
+            var payload = JSON.stringify({
+                uptime: { totalS: Math.round((root.totalPcUptimeMs + root.systemUptimeMs) / 1000) },
+                apps:   apps
+            })
+            screentimeSaveProc.screentimePayload = payload
+            screentimeSaveProc.running = false
+            screentimeSaveProc.running = true
+        }
+
+        Process {
+            id: screentimeLoadProc
+            running: false
+            command: []
+            stdout: SplitParser {
+                splitMarker: "\n"
+                onRead: data => {
+                    var line = data.trim()
+                    if (line === "" || line === "{}") return
+                    try {
+                        var obj  = JSON.parse(line)
+
+                        // Restore uptime (subtract current boot so we don't double-count)
+                        // Accept totalS (new) or totalMs (old files) for migration
+                        var uptimeObj = obj.uptime || {}
+                        var savedUptimeMs = uptimeObj.totalS !== undefined
+                            ? uptimeObj.totalS * 1000
+                            : (uptimeObj.totalMs || 0)
+                        root.totalPcUptimeMs = Math.max(0, savedUptimeMs - root.systemUptimeMs)
+
+                        // Restore app playtime (normalize keys to lowercase, merging duplicates)
+                        // Accept totalS (new) or totalMs (old files) for migration
+                        var appsObj = obj.apps || {}
+                        var d = root.playtimeData
+                        var keys = Object.keys(appsObj)
+                        for (var i = 0; i < keys.length; i++) {
+                            var k = keys[i].toLowerCase()
+                            if (!d[k]) d[k] = { totalMs: 0, sessionMs: 0 }
+                            var entry = appsObj[keys[i]]
+                            var ms = entry.totalS !== undefined ? entry.totalS * 1000 : (entry.totalMs || 0)
+                            d[k].totalMs += ms
+                        }
+                        root.playtimeData = d
+                    } catch(e) {}
+                }
+            }
+        }
+        function loadPlaytimeData() {
+            // Also migrate old separate files if the combined file doesn't exist yet
+            screentimeLoadProc.command = [
+                "bash",
+                Qt.resolvedUrl("./scripts/screentime-load.sh").toString().replace("file://", ""),
+                root.screentimeFile, root.configDir
+            ]
+            screentimeLoadProc.running = false
+            screentimeLoadProc.running = true
+        }
+
+        // Poll Hyprland active window every 2 s
+        Process {
+            id: activeWindowPoller
+            running: true
+            command: ["bash", Qt.resolvedUrl("./scripts/active-window.sh").toString().replace("file://", "")]
+            stdout: SplitParser {
+                splitMarker: "\n"
+                onRead: data => {
+                    var cls = data.trim()
+                    if (cls !== root.activeWindowClass)
+                        root.recordWindowSwitch(cls)
+                }
+            }
+        }
+
+	Process {
+    		id: steamAppResolver
+    		running: false
+    		command: ["bash", "-c", "hyprctl activewindow -j 2>/dev/null | python3 -c \"\nimport json,sys\nd=json.load(sys.stdin)\ntitle=(d.get('title') or '').strip()\ncls=(d.get('class') or '').strip().lower()\nprint(title if cls=='steam_app_default' else cls)\n\""]
+    		stdout: SplitParser {
+        		splitMarker: "\n"
+        		onRead: data => {
+            		var resolved = data.trim().toLowerCase()
+            		if (resolved === "" || resolved === "steam_app_default") {
+                		root.activeWindowClass = "steam_app_default"
+            		} else {
+                		root.activeWindowClass = resolved
+            		}
+            		root.activeWindowSince = Date.now()
+        		}
+    		}
+	}
+
+        Timer {
+            interval: 60000; running: true; repeat: true
+            onTriggered: root.saveScreentimeData()
+        }
+
+        Timer {
+            interval: 1000; running: true; repeat: true
+            onTriggered: {
+                systemUptimePoller.running = false
+                systemUptimePoller.running = true
+            }
+        }
+
+        Process {
+            id: systemUptimePoller
+            running: true
+            command: ["bash", Qt.resolvedUrl("./scripts/uptime-poll.sh").toString().replace("file://", "")]
+            stdout: SplitParser {
+                splitMarker: "\n"
+                onRead: data => {
+                    var ms = parseInt(data.trim())
+                    if (!isNaN(ms)) {
+                        root.systemUptimeMs  = ms
+                        root.systemUptimeStr = root.fmtDuration(ms)
+                        root.totalPcUptimeStr = root.fmtDuration(root.totalPcUptimeMs + ms)
+                    }
+                }
+            }
+        }
+
+        // Pre-populate app icons for screentime
+        Component.onCompleted: {
+            appLauncherLoader.running = true
+        }
+
+        // Load saved screentime once at startup, after uptime has been read
+        Timer {
+            id: screentimeStartupLoader
+            interval: 1500
+            running: true
+            repeat: false
+            onTriggered: root.loadPlaytimeData()
+        }
 
 	Timer {
     		id: cavaFrame
@@ -479,16 +751,7 @@ ShellRoot {
 	}
 
         Process {
-            command: ["bash", "-c",
-                "CONFIG=$(mktemp /tmp/cava-XXXXXX.conf); " +
-                "printf '[general]\\nbars=10\\nsleep_timer=2\\n" +
-                "sensitivity=200\\nnoise_reduction=0.4\\n" +
-                "[input]\\nmethod=pulse\\nsource=auto\\n" +
-                "[output]\\nmethod=raw\\nraw_target=/dev/stdout\\n" +
-                "data_format=ascii\\nascii_max_range=9\\n" +
-                "bar_delimiter=59\\nframe_delimiter=10\\n' > \"$CONFIG\"; " +
-                "exec cava -p \"$CONFIG\""
-            ]
+            command: ["bash", Qt.resolvedUrl("./scripts/cava.sh").toString().replace("file://", "")]
             running: true
             stdout: SplitParser {
                 splitMarker: "\n"
@@ -511,15 +774,7 @@ ShellRoot {
         Process {
             id: musicDirFinder
             running: true
-            command: ["bash", "-c",
-                "for f in ~/.config/mpd/mpd.conf /etc/mpd.conf; do " +
-                "  [ -f \"$f\" ] || continue; " +
-                "  D=$(grep -Po '(?<=music_directory \")[^\"]+' \"$f\" 2>/dev/null | head -1); " +
-                "  [ -z \"$D\" ] && D=$(grep -Po \"(?<=music_directory ')[^']+\" \"$f\" 2>/dev/null | head -1); " +
-                "  [ -n \"$D\" ] && eval echo \"$D\" && exit 0; " +
-                "done; " +
-                "echo \"$HOME/Music\""
-            ]
+            command: ["bash", Qt.resolvedUrl("./scripts/music-dir.sh").toString().replace("file://", "")]
             stdout: SplitParser {
                 splitMarker: "\n"
                 onRead: data => {
@@ -549,24 +804,6 @@ ShellRoot {
                     var file = parts[2] || ""
                     if (file !== "") artFetcher.startFetch(file)
                     else root.albumArt = ""
-                }
-            }
-        }
-
-        Timer {
-            interval: 1000; running: true; repeat: true
-            onTriggered: statusPoller.running = true
-        }
-        Process {
-            id: statusPoller
-            running: false
-            command: ["bash", "-c", "mpc status 2>/dev/null | grep -oP '\\[(playing|paused)\\]' | tr -d '[]'"]
-            stdout: SplitParser {
-                splitMarker: "\n"
-                onRead: data => {
-                    var s = data.trim()
-                    if (s !== "") root.isPlaying = (s === "playing")
-                    statusPoller.running = false
                 }
             }
         }
@@ -603,6 +840,26 @@ ShellRoot {
             }
         }
 
+        Timer {
+            interval: 1000; running: true; repeat: true
+            onTriggered: statusPoller.running = true
+        }
+        Process {
+            id: statusPoller
+            running: false
+            command: ["bash", Qt.resolvedUrl("./scripts/music-status.sh").toString().replace("file://", "")]
+            stdout: SplitParser {
+                splitMarker: "\n"
+                onRead: data => {
+                    var s = data.trim()
+                    if (s !== "") root.isPlaying = (s === "playing")
+                    statusPoller.running = false
+                }
+            }
+        }
+
+
+
         Process { id: mpcPrev;   running: false; command: ["mpc", "prev"] }
         Process { id: mpcToggle; running: false; command: ["mpc", "toggle"] }
         Process { id: mpcNext;   running: false; command: ["mpc", "next"] }
@@ -610,7 +867,7 @@ ShellRoot {
         Process {
             id: volumePoller
             running: true
-            command: ["bash", "-c", "wpctl get-volume @DEFAULT_AUDIO_SINK@ 2>/dev/null | grep -oP '[0-9]+\\.[0-9]+'"]
+            command: ["bash", Qt.resolvedUrl("./scripts/volume-get.sh").toString().replace("file://", "")]
             stdout: SplitParser {
                 splitMarker: "\n"
                 onRead: data => {
@@ -623,26 +880,7 @@ ShellRoot {
         Process {
             id: appVolumePoller
             running: false
-            command: ["bash", "-c",
-
-                "wpctl status 2>/dev/null | sed -n '/Streams:/,/^[^ ]/p' | " +
-                "grep -E '^[[:space:]]+[0-9]+\\.' | " +
-                "sed -E 's/^[[:space:]]*([0-9]+)\\. (.*)$/\\1|\\2/' | " +
-                "while IFS='|' read -r ID NAME; do " +
-
-                "case \"$NAME\" in " +
-                "  *pavucontrol*|*Pavucontrol*|*PulseAudio*|*pulseaudio*) continue;; " +
-                "  *capture*|*Capture*|*record*|*Record*|*microphone*|*Microphone*) continue;; " +
-                "esac; " +
-
-                "MEDIA_CLASS=$(pw-cli info \"$ID\" 2>/dev/null | grep 'media.class' | grep -o '\"[^\"]*\"' | tail -1 | tr -d '\"'); " +
-                "case \"$MEDIA_CLASS\" in " +
-                "  Stream/Output/Audio) ;; " +
-                "  *) continue;; " +
-                "esac; " +
-                "V=$(wpctl get-volume \"$ID\" 2>/dev/null | grep -oP '[0-9]+\\.[0-9]+' | head -1); " +
-                "[ -n \"$V\" ] && printf '%s|%s|%s\\n' \"$ID\" \"$NAME\" \"$V\"; done"
-            ]
+            command: ["bash", Qt.resolvedUrl("./scripts/app-volumes.sh").toString().replace("file://", "")]
             stdout: SplitParser {
                 splitMarker: "\n"
                 onRead: data => {
@@ -673,7 +911,11 @@ ShellRoot {
             running: false
             property int targetNode: 0
             property real targetVol: 0
-            command: ["bash", "-c", "wpctl set-volume " + targetNode + " " + Math.round(targetVol * 100) + "%"]
+            command: [
+                "bash",
+                Qt.resolvedUrl("./scripts/app-volume-set.sh").toString().replace("file://", ""),
+                targetNode.toString(), Math.round(targetVol * 100).toString()
+            ]
         }
 
         Timer {
@@ -690,9 +932,7 @@ ShellRoot {
         Process {
             id: obsStatePoller
             running: true
-            command: ["bash", "-c",
-                "obs-cmd -w obsws://localhost:4455 recording status 2>/dev/null | grep -i 'active:' | grep -qi 'true' && echo 'recording' || echo 'stopped'"
-            ]
+            command: ["bash", Qt.resolvedUrl("./scripts/obs-status.sh").toString().replace("file://", "")]
             stdout: SplitParser {
                 splitMarker: "\n"
                 onRead: data => {
@@ -705,10 +945,7 @@ ShellRoot {
         Process {
             id: brightnessPoller
             running: true
-            command: ["bash", "-c",
-                "B=$(brightnessctl get 2>/dev/null); M=$(brightnessctl max 2>/dev/null); " +
-                "[ -n \"$B\" ] && [ -n \"$M\" ] && echo \"scale=4; $B / $M\" | bc || echo '0.5'"
-            ]
+            command: ["bash", Qt.resolvedUrl("./scripts/brightness-get.sh").toString().replace("file://", "")]
             stdout: SplitParser {
                 splitMarker: "\n"
                 onRead: data => {
@@ -722,57 +959,50 @@ ShellRoot {
             id: volumeSetter
             running: false
             property real targetVol: 0
-            command: ["bash", "-c", "wpctl set-volume @DEFAULT_AUDIO_SINK@ " + Math.round(targetVol * 100) + "%"]
+            command: [
+                "bash",
+                Qt.resolvedUrl("./scripts/volume-set.sh").toString().replace("file://", ""),
+                Math.round(targetVol * 100).toString()
+            ]
         }
 
         Process {
             id: brightnessSetter
             running: false
             property real targetBright: 0
-            command: ["bash", "-c", "brightnessctl set " + Math.round(targetBright * 100) + "%"]
+            command: [
+                "bash",
+                Qt.resolvedUrl("./scripts/brightness-set.sh").toString().replace("file://", ""),
+                Math.round(targetBright * 100).toString()
+            ]
         }
 
-	Process {
-    	    id: wifiToggleProc
-    	    running: false
-    	    property bool enabling: true
-
-    	    command: [
-                "bash", "-c",
-        	enabling
-            	    ? "connmanctl enable wifi && connmanctl enable ethernet"
-            	    : "connmanctl disable wifi && connmanctl disable ethernet"
-    	    ]
-	}
+        Process {
+            id: wifiToggleProc
+            running: false
+            property bool enabling: true
+            command: [
+                "bash",
+                Qt.resolvedUrl("./scripts/wifi-toggle.sh").toString().replace("file://", ""),
+                enabling ? "enable" : "disable"
+            ]
+        }
 
         Process {
             id: btToggleProc
             running: false
             property bool enabling: true
-            command: ["bash", "-c", enabling ? "rfkill unblock bluetooth" : "rfkill block bluetooth"]
+            command: [
+                "bash",
+                Qt.resolvedUrl("./scripts/bt-toggle.sh").toString().replace("file://", ""),
+                enabling ? "enable" : "disable"
+            ]
         }
 
         Process {
             id: wifiScanProc
             running: false
-            command: ["bash", "-c",
-
-                "connmanctl scan wifi 2>/dev/null; sleep 1; " +
-                "connmanctl services 2>/dev/null | grep -E '^\\s+[\\*o ]' | " +
-                "while read line; do " +
-                "  NAME=$(echo \"$line\" | sed 's/^[[:space:]]*[\\*o ]\\?[[:space:]]*//' | sed 's/[[:space:]]*wifi_[a-f0-9_]*$//'); " +
-                "  SERVICE=$(echo \"$line\" | grep -oP 'wifi_[a-f0-9_]+'); " +
-                "  [ -z \"$SERVICE\" ] && continue; " +
-                "  CONNECTED=$(echo \"$line\" | grep -c '^[[:space:]]\\*'); " +
-                "  INFO=$(connmanctl services \"$SERVICE\" 2>/dev/null); " +
-                "  STRENGTH=$(echo \"$INFO\" | grep -oP 'Strength = \\K[0-9]+' | head -1); " +
-                "  SECURITY=$(echo \"$INFO\" | grep -oP 'Security = \\[ \\K[^\\]]+' | head -1); " +
-                "  [ -z \"$STRENGTH\" ] && STRENGTH=0; " +
-                "  [ -z \"$SECURITY\" ] && SECURITY=none; " +
-                "  [ -z \"$NAME\" ] && NAME=\"Hidden network\"; " +
-                "  printf '%s\\x1f%s\\x1f%s\\x1f%s\\x1f%s\\n' \"$NAME\" \"$SERVICE\" \"$STRENGTH\" \"$SECURITY\" \"$CONNECTED\"; " +
-                "done"
-            ]
+            command: ["bash", Qt.resolvedUrl("./scripts/wifi-scan.sh").toString().replace("file://", "")]
             stdout: SplitParser {
                 splitMarker: "\n"
                 onRead: data => {
@@ -803,7 +1033,11 @@ ShellRoot {
             id: wifiConnectProc
             running: false
             property string targetService: ""
-            command: ["bash", "-c", "connmanctl connect \"" + targetService + "\" 2>&1 | tail -1"]
+            command: [
+                "bash",
+                Qt.resolvedUrl("./scripts/wifi-connect.sh").toString().replace("file://", ""),
+                targetService
+            ]
             stdout: SplitParser {
                 splitMarker: "\n"
                 onRead: data => {
@@ -824,33 +1058,34 @@ ShellRoot {
             id: wifiDisconnectProc
             running: false
             property string targetService: ""
-            command: ["bash", "-c", "connmanctl disconnect \"" + targetService + "\" 2>/dev/null"]
+            command: [
+                "bash",
+                Qt.resolvedUrl("./scripts/wifi-disconnect.sh").toString().replace("file://", ""),
+                targetService
+            ]
         }
 
         Process {
             id: screenshotProc
             running: false
-            command: ["bash", "-c",
-                "mkdir -p \"$HOME/Pictures/Snips\"; " +
-                "ts=$(date +%Y%m%d-%H%M%S); " +
-                "grim -g \"$(slurp)\" \"$HOME/Pictures/Snips/snip-$ts.png\" && " +
-                "wl-copy < \"$HOME/Pictures/Snips/snip-$ts.png\" && " +
-                "notify-send 'Snip saved & copied' \"$HOME/Pictures/Snips/snip-$ts.png\" || " +
-                "notify-send 'Snip cancelled'"
-            ]
+            command: ["bash", Qt.resolvedUrl("./scripts/screenshot.sh").toString().replace("file://", "")]
+        }
+
+        Timer {
+            id: screenshotDelayTimer
+            interval: 300
+            repeat: false
+            onTriggered: {
+                screenshotProc.running = false
+                screenshotProc.running = true
+            }
         }
 
         property bool obsRecording: false
         Process {
             id: obsStartProc
             running: false
-            command: ["bash", "-c",
-                "pgrep -x obs > /dev/null || obs --minimize-to-tray &>/dev/null & " +
-                "for i in $(seq 1 20); do " +
-                "  obs-cmd -w obsws://localhost:4455 recording start 2>/dev/null && exit 0; " +
-                "  sleep 0.5; " +
-                "done"
-            ]
+            command: ["bash", Qt.resolvedUrl("./scripts/obs-start.sh").toString().replace("file://", "")]
         }
         Process {
             id: obsStopProc
@@ -858,20 +1093,21 @@ ShellRoot {
             command: ["obs-cmd", "-w", "obsws://localhost:4455", "recording", "stop"]
         }
 
-        property bool vpnConnected: false
+        property bool   vpnConnected:     false
+        property string vpnLocation:      ""
+        property bool   vpnLocationsOpen: false
+        property bool   vpnLongDidFire:   false
+        ListModel { id: vpnLocationModel }
         Process {
             id: vpnStatusPoller
             running: true
-            command: ["bash", "-c",
-                "while true; do " +
-                "  mullvad status 2>/dev/null | head -1 | grep -qi '^connected' && echo connected || echo disconnected; " +
-                "  sleep 3; " +
-                "done"
-            ]
+            command: ["bash", Qt.resolvedUrl("./scripts/vpn-watch.sh").toString().replace("file://", "")]
             stdout: SplitParser {
                 splitMarker: "\n"
                 onRead: data => {
-                    root.vpnConnected = data.trim() === "connected"
+                    var s = data.trim()
+                    root.vpnConnected = s.startsWith("connected")
+                    root.vpnLocation  = s.startsWith("connected · ") ? s.slice("connected · ".length) : ""
                 }
             }
         }
@@ -887,103 +1123,92 @@ ShellRoot {
         }
 
         Process {
+            id: vpnLocationLoader
+            running: false
+            command: ["bash", Qt.resolvedUrl("./scripts/vpn-locations.sh").toString().replace("file://", "")]
+            stdout: SplitParser {
+                splitMarker: "\n"
+                onRead: data => {
+                    var parts = data.trim().split("|")
+                    if (parts.length < 4) return
+                    vpnLocationModel.append({
+                        locCountry:     parts[0],
+                        locCountryCode: parts[1],
+                        locCity:        parts[2],
+                        locCityCode:    parts[3]
+                    })
+                }
+            }
+        }
+
+        Process {
+            id: vpnLocationSetProc
+            running: false
+            property string countryCode: ""
+            property string cityCode:    ""
+            command: [
+                "bash",
+                Qt.resolvedUrl("./scripts/vpn-location-set.sh").toString().replace("file://", ""),
+                countryCode, cityCode
+            ]
+        }
+
+        Process {
             id: sleepProc
             running: false
-            command: ["bash", "-c", "hyprctl dispatch dpms off && loginctl suspend 2>/dev/null || zzz"]
+            command: ["bash", Qt.resolvedUrl("./scripts/sleep.sh").toString().replace("file://", "")]
         }
         Process {
             id: rebootProc
             running: false
-            command: ["bash", "-c", "loginctl reboot 2>/dev/null || reboot"]
+            command: ["bash", Qt.resolvedUrl("./scripts/reboot.sh").toString().replace("file://", "")]
         }
         Process {
             id: shutdownProc
             running: false
-            command: ["bash", "-c", "loginctl poweroff 2>/dev/null || poweroff"]
+            command: ["bash", Qt.resolvedUrl("./scripts/shutdown.sh").toString().replace("file://", "")]
         }
         Process {
             id: lockProc
             running: false
-            command: ["bash", "-c", "hyprlock || swaylock -f || loginctl lock-session"]
+            command: ["bash", Qt.resolvedUrl("./scripts/lock.sh").toString().replace("file://", "")]
         }
 
-        property var notchLayout: [["Date", "Cava", "Time"], ["Workspaces"], ["Timer"]]
+        property var    notchLayout:    [["Date", "Cava", "Time"], ["Workspaces"], ["Timer"]]
+        property var    _notchParsed:   []
+        property string notchLayoutRaw: "notch1 = [Date, Cava, Time]\nnotch2 = [Workspaces]\nnotch3 = [Timer]"
 
         readonly property string configDir:  "/home/daveee/.config/quickshell/dynamic-island"
         readonly property string configFile: configDir + "/config"
 
-        property var _configParsed: []
 
         Process {
             id: configInitProc
             running: true
-            command: ["bash", "-c",
-                "DIR=\"" + root.configDir + "\"; " +
-                "FILE=\"" + root.configFile + "\"; " +
-                "mkdir -p \"$DIR\"; " +
-                "if [ ! -f \"$FILE\" ]; then " +
-                "  cat > \"$FILE\" << 'CFGEOF'\n" +
-                "# Dynamic Island notch layout\n" +
-                "# Each line defines one swipeable notch page.\n" +
-                "# Valid widgets: Date, Time, Cava, Workspaces, Timer\n" +
-                "# You can define as many notches as you want.\n" +
-                "#\n" +
-                "# Examples:\n" +
-                "#   firstNotch  = [Date, Cava, Time]\n" +
-                "#   secondNotch = [Workspaces]\n" +
-                "#   thirdNotch  = [Timer]\n" +
-                "\n" +
-                "firstNotch  = [Date, Cava, Time]\n" +
-                "secondNotch = [Workspaces]\n" +
-                "thirdNotch  = [Timer]\n" +
-                "\n" +
-                "# ── Click bindings ────────────────────────────────\n" +
-                "# Valid actions: music, controlPanel, notifHistory, appLauncher, none\n" +
-                "\n" +
-                "clickLeft   = music\n" +
-                "clickRight  = controlPanel\n" +
-                "clickMiddle = notifHistory\n" +
-                "\n" +
-                "# ── Gesture bindings ──────────────────────────────\n" +
-                "# Valid actions: music, controlPanel, notifHistory, appLauncher, none\n" +
-                "\n" +
-                "dragDown    = appLauncher\n" +
-                "\n" +
-                "# ── Theme ────────────────────────────────────────\n" +
-                "# pillColor:   pill background hex colour\n" +
-                "# pillOpacity: 0.0 – 1.0 (1.0 = fully opaque)\n" +
-                "# accentColor: toggle / active highlight colour\n" +
-                "# textColor:   primary text colour\n" +
-                "# fontFamily:  font name, or leave blank for system default\n" +
-                "\n" +
-                "pillColor   = #000000\n" +
-                "pillOpacity = 1.0\n" +
-                "accentColor = #2196F3\n" +
-                "textColor   = #ffffff\n" +
-                "fontFamily  =\n" +
-                "CFGEOF\n" +
-                "fi; " +
-                "cat \"$FILE\""
+            command: [
+                "bash",
+                Qt.resolvedUrl("./scripts/config-init.sh").toString().replace("file://", ""),
+                root.configDir, root.configFile
             ]
+            property string _raw: ""
             stdout: SplitParser {
                 splitMarker: "\n"
                 onRead: data => {
                     var line = data.trim()
-                    if (line === "" || line.startsWith("#")) return
-
+                    if (line === "" || line[0] === "#") return
                     var ma = line.match(/^\w+\s*=\s*\[([^\]]*)\]/)
                     if (ma) {
+                        configInitProc._raw += data + "\n"
                         var widgets = ma[1].split(",")
                             .map(function(s) { return s.trim() })
                             .filter(function(s) { return s !== "" })
                         if (widgets.length > 0) {
-                            var copy = root._configParsed.slice()
+                            var copy = root._notchParsed.slice()
                             copy.push(widgets)
-                            root._configParsed = copy
+                            root._notchParsed = copy
                         }
                         return
                     }
-
                     var mf = line.match(/^(fontFamily)\s*=\s*(.*)/)
                     if (mf) { root.fontFamily = mf[2].trim(); return }
                     var ms = line.match(/^(\w+)\s*=\s*(\S+)/)
@@ -992,7 +1217,8 @@ ShellRoot {
                     if      (key === "clickLeft")   root.clickLeft   = val
                     else if (key === "clickRight")  root.clickRight  = val
                     else if (key === "clickMiddle") root.clickMiddle = val
-                    else if (key === "dragDown")    root.dragDown    = val
+                    else if (key === "dragDown")      root.dragDown      = val
+                    else if (key === "dragDownRight") root.dragDownRight = val
                     else if (key === "pillColor")   root.pillColor   = val
                     else if (key === "pillOpacity") root.pillOpacity = parseFloat(val)
                     else if (key === "accentColor") root.accentColor = val
@@ -1001,8 +1227,13 @@ ShellRoot {
                 }
             }
             onRunningChanged: {
-                if (!running && root._configParsed.length > 0)
-                    root.notchLayout = root._configParsed.slice()
+                if (!running) {
+                    var raw = _raw
+                    _raw = ""
+                    root.notchLayoutRaw = raw.replace(/\n$/, "")
+                    if (root._notchParsed.length > 0) root.notchLayout = root._notchParsed.slice()
+                    root._notchParsed = []
+                }
             }
         }
 
@@ -1011,7 +1242,8 @@ ShellRoot {
             path:    root.configFile
             watchChanges: true
             onFileChanged: {
-                root._configParsed = []
+                configReloadProc._raw = ""
+                configReloadProc._notchParsed = []
                 configReloadProc.running = false
                 configReloadProc.running = true
             }
@@ -1020,21 +1252,28 @@ ShellRoot {
         Process {
             id: configReloadProc
             running: false
-            command: ["bash", "-c", "cat \"" + root.configFile + "\""]
+            command: [
+                "bash",
+                Qt.resolvedUrl("./scripts/config-read.sh").toString().replace("file://", ""),
+                root.configFile
+            ]
+            property string _raw: ""
+            property var _notchParsed: []
             stdout: SplitParser {
                 splitMarker: "\n"
                 onRead: data => {
                     var line = data.trim()
-                    if (line === "" || line.startsWith("#")) return
+                    if (line === "" || line[0] === "#") return
                     var ma = line.match(/^\w+\s*=\s*\[([^\]]*)\]/)
                     if (ma) {
+                        configReloadProc._raw += data + "\n"
                         var widgets = ma[1].split(",")
                             .map(function(s) { return s.trim() })
                             .filter(function(s) { return s !== "" })
                         if (widgets.length > 0) {
-                            var copy = root._configParsed.slice()
+                            var copy = configReloadProc._notchParsed.slice()
                             copy.push(widgets)
-                            root._configParsed = copy
+                            configReloadProc._notchParsed = copy
                         }
                         return
                     }
@@ -1046,7 +1285,8 @@ ShellRoot {
                     if      (key === "clickLeft")   root.clickLeft   = val
                     else if (key === "clickRight")  root.clickRight  = val
                     else if (key === "clickMiddle") root.clickMiddle = val
-                    else if (key === "dragDown")    root.dragDown    = val
+                    else if (key === "dragDown")      root.dragDown      = val
+                    else if (key === "dragDownRight") root.dragDownRight = val
                     else if (key === "pillColor")   root.pillColor   = val
                     else if (key === "pillOpacity") root.pillOpacity = parseFloat(val)
                     else if (key === "accentColor") root.accentColor = val
@@ -1055,10 +1295,53 @@ ShellRoot {
                 }
             }
             onRunningChanged: {
-                if (!running && root._configParsed.length > 0)
-                    root.notchLayout = root._configParsed.slice()
+                if (!running) {
+                    var raw = _raw
+                    _raw = ""
+                    root.notchLayoutRaw = raw.replace(/\n$/, "")
+                    if (_notchParsed.length > 0) root.notchLayout = _notchParsed.slice()
+                    _notchParsed = []
+                }
             }
         }
+
+
+        Process {
+            id: configSaveProc
+            running: false
+            property string pendingContent: ""
+            command: [
+                "bash",
+                Qt.resolvedUrl("./scripts/config-save.sh").toString().replace("file://", ""),
+                root.configFile
+            ]
+            environment: ({ "_ISLAND_CFG": pendingContent })
+        }
+
+        function saveNotchLayout(rawText) {
+            root.notchLayoutRaw = rawText
+            root.saveConfig()
+        }
+
+        function saveConfig() {
+            var content =
+                "clickLeft   = " + root.clickLeft   + "\n" +
+                "clickRight  = " + root.clickRight  + "\n" +
+                "clickMiddle = " + root.clickMiddle + "\n" +
+                "dragDown      = " + root.dragDown      + "\n" +
+                "dragDownRight = " + root.dragDownRight + "\n" +
+                "pillColor   = " + root.pillColor   + "\n" +
+                "pillOpacity = " + root.pillOpacity + "\n" +
+                "accentColor = " + root.accentColor + "\n" +
+                "textColor   = " + root.textColor   + "\n" +
+                "fontFamily  = " + root.fontFamily  + "\n" +
+                "\n" +
+                root.notchLayoutRaw + "\n"
+            configSaveProc.pendingContent = content
+            configSaveProc.running = false
+            configSaveProc.running = true
+        }
+
 
         function drawBar(ctx, x, y, w, h, r) {
             r = Math.min(r, w / 2, h / 2)
@@ -1081,7 +1364,7 @@ ShellRoot {
             anchors.top:   true
             anchors.left:  true
             anchors.right: true
-            implicitHeight: 44
+            implicitHeight: Math.round(44 * root.uiScale)
             color: "transparent"
             exclusiveZone: implicitHeight
         }
@@ -1091,17 +1374,19 @@ ShellRoot {
             anchors.top:   true
             anchors.left:  true
             anchors.right: true
-            implicitHeight: 530
+            implicitHeight: Math.round(530 * root.uiScale)
             color: "transparent"
             exclusiveZone: -1
             WlrLayershell.layer: WlrLayer.Overlay
-            WlrLayershell.keyboardFocus: root.islandState === "appLauncher" ? WlrKeyboardFocus.OnDemand : WlrKeyboardFocus.None
+            WlrLayershell.keyboardFocus: (root.islandState === "appLauncher" || root.islandState === "screenTime" || root.islandState === "settings") ? WlrKeyboardFocus.OnDemand : WlrKeyboardFocus.None
             mask: Region {
                 x:      root.wifiNetworksOpen ? pillWrapper.x - 196 - 8 : pillWrapper.x
                 y:      0
-                width:  (root.soundAppsOpen    ? pillWrapper.width + 196 + 8 : pillWrapper.width)
-                      + (root.wifiNetworksOpen  ? 196 + 8                    : 0)
-                height: pillWrapper.height + (root.islandState === "appLauncher" ? 30 : 0)
+                width:  (root.soundAppsOpen       ? pillWrapper.width + 196 + 8 : pillWrapper.width)
+                      + (root.wifiNetworksOpen    ? 196 + 8                     : 0)
+                      + (root.vpnLocationsOpen && root.islandState === "controlPanel" ? 196 + 8 : 0)
+                      + (root.colorWheelOpen && root.islandState === "settings" ? 240 + 8 : 0)
+                height: pillWrapper.height + ((root.islandState === "appLauncher" || root.islandState === "screenTime" || root.islandState === "settings") ? 30 : 0)
             }
 
             Item {
@@ -1109,7 +1394,7 @@ ShellRoot {
                 anchors.top: parent.top
                 x: (parent.width - width) / 2
 
-                property real defaultContentWidth: 260
+                property real defaultContentWidth: Math.round(260 * root.uiScale)
 
                 property real availableNotchWidth: Math.max(210, parent.width - 32)
                 property real musicContentWidth: Math.min(
@@ -1128,6 +1413,8 @@ ShellRoot {
                        root.islandState === "notification" ? Math.min(340, availableNotchWidth) :
                        root.islandState === "notifHistory" ? Math.min(380, availableNotchWidth) :
                        root.islandState === "appLauncher" ? Math.min(440, availableNotchWidth) :
+                       root.islandState === "screenTime" ? Math.min(440, availableNotchWidth) :
+                       root.islandState === "settings" ? Math.min(440, availableNotchWidth) :
                        Math.min(410, availableNotchWidth)
 
                 Behavior on width {
@@ -1144,16 +1431,19 @@ ShellRoot {
                     + 10 + 52
                     + 10 + 52
                     + 10 + 14
-                    + (silenceHandleOpen ? 10 + 52 : 0)
-                    + 14
+                    + (silenceHandleOpen ? 8 + 52 + 8 + 52 : 0)
 
                 property real notifHistoryHeight: Math.min(420, 52 + Math.max(1, notifHistory.count) * 68)
                 property real appLauncherHeight: 500
-                height: root.islandState === "default" ? 44 :
+                property real screenTimeHeight: 480
+                property real settingsHeight: 540
+                height: root.islandState === "default" ? Math.round(44 * root.uiScale) :
                         root.islandState === "music" ? 90 :
                         root.islandState === "notification" ? 72 :
                         root.islandState === "notifHistory" ? notifHistoryHeight :
                         root.islandState === "appLauncher" ? appLauncherHeight :
+                        root.islandState === "screenTime" ? screenTimeHeight :
+                        root.islandState === "settings" ? settingsHeight :
                         controlPanelHeight
 
                 Behavior on width {
@@ -1355,7 +1645,13 @@ ShellRoot {
                                     width:  defaultView.width
                                     height: parent.height
 
+                                    // Page-level helpers so per-widget items can see the full widget list.
+                                    readonly property var  pageWidgets:      modelData
+                                    readonly property bool leftEdgeIsCava:   pageWidgets.length > 0 && pageWidgets[0] === "Cava"
+                                    readonly property bool rightEdgeIsCava:  pageWidgets.length > 0 && pageWidgets[pageWidgets.length - 1] === "Cava"
+
                                     RowLayout {
+                                        id: notchRowLayout
                                         anchors.fill:           parent
                                         anchors.leftMargin:     14
                                         anchors.rightMargin:    14
@@ -1371,6 +1667,12 @@ ShellRoot {
                                                 required property int    index
                                                 Layout.fillWidth:  true
                                                 Layout.fillHeight: true
+
+                                                readonly property var  pageWidgets: parent.parent.pageWidgets || []
+                                                readonly property bool isCava:      modelData === "Cava"
+
+                                                Layout.leftMargin:  0
+                                                Layout.rightMargin: 0
 
                                                 Text {
                                                     visible: parent.modelData === "Date"
@@ -1394,23 +1696,181 @@ ShellRoot {
                                                 Canvas {
                                                     visible: parent.modelData === "Cava"
                                                     anchors.fill: parent
-                                                    width:  parent.width
-                                                    height: parent.height
                                                     readonly property real maxBarH: 26
                                                     property var bars: root.cavaBars
-                                                    onBarsChanged: if (root.islandState === "default") requestPaint()
+
+                                                    onBarsChanged: requestPaint()
+                                                    onWidthChanged: requestPaint()
+                                                    onHeightChanged: requestPaint()
                                                     onPaint: {
                                                         var ctx = getContext("2d")
                                                         ctx.clearRect(0, 0, width, height)
-                                                        var n = 10, sp = 2
+                                                        var n  = 10
+                                                        var sp = 2
                                                         var bw = (width - sp * (n - 1)) / n
                                                         for (var i = 0; i < n; i++) {
-                                                            var v = (i < bars.length) ? bars[i] : 0
+                                                            var v = bars[i] || 0
                                                             var h = Math.max(3, (v / 9) * maxBarH)
                                                             var x = i * (bw + sp)
                                                             var y = (height - h) / 2
                                                             ctx.fillStyle = root.tc(0.85)
                                                             root.drawBar(ctx, x, y, bw, h, Math.min(3, bw / 2, h / 2))
+                                                        }
+                                                    }
+                                                }
+
+                                                // ── System Overview widget ──────────────────
+                                                // CPU: big icon (left) | % label above bar (right half)
+                                                // RAM: % label above bar (left half) | big icon (right)  ← mirrored
+                                                // All sizes multiplied by pillWrapper.uiScale so the widget
+                                                // looks identical relative to screen height on 1080p / 1440p / 4K.
+                                                Item {
+                                                    visible: parent.modelData === "SysOverview"
+                                                    anchors.fill: parent
+
+                                                    // Convenience alias so children don't need to traverse far
+                                                    readonly property real sc: root.uiScale
+
+                                                    // ── CPU side (icon left, bar+label right) ──
+                                                    Item {
+                                                        id: cpuSide
+                                                        anchors.left:   parent.left
+                                                        anchors.top:    parent.top
+                                                        anchors.bottom: parent.bottom
+                                                        anchors.right:  parent.horizontalCenter
+                                                        anchors.rightMargin: Math.round(3 * parent.sc)
+
+                                                        // Big CPU icon, vertically centred on left edge
+                                                        Text {
+                                                            id: cpuIcon
+                                                            anchors.left:           parent.left
+                                                            anchors.verticalCenter: parent.verticalCenter
+                                                            text:  "󰍛"
+                                                            color: Qt.color(root.arcColor(root.sysCpuPct))
+                                                            font.pixelSize: Math.round(18 * cpuSide.parent.sc)
+                                                            font.family:    root.fontFamily
+                                                            Behavior on color { ColorAnimation { duration: 300 } }
+                                                        }
+
+                                                        // Bar + label stacked, to the right of the icon
+                                                        Item {
+                                                            anchors.left:           cpuIcon.right
+                                                            anchors.leftMargin:     Math.round(4 * cpuSide.parent.sc)
+                                                            anchors.right:          parent.right
+                                                            anchors.verticalCenter: parent.verticalCenter
+                                                            height: Math.round(20 * cpuSide.parent.sc)
+
+                                                            // % number above bar
+                                                            Text {
+                                                                id: cpuLabel
+                                                                anchors.bottom:       cpuTrack.top
+                                                                anchors.bottomMargin: Math.round(2 * cpuSide.parent.sc)
+                                                                anchors.left:         parent.left
+                                                                text:  root.sysCpuPct + "%"
+                                                                color: Qt.color(root.arcColor(root.sysCpuPct))
+                                                                font.pixelSize: Math.round(8 * cpuSide.parent.sc)
+                                                                font.family:    root.fontFamily
+                                                                font.weight:    Font.Medium
+                                                                Behavior on color { ColorAnimation { duration: 300 } }
+                                                            }
+
+                                                            // Track
+                                                            Rectangle {
+                                                                id: cpuTrack
+                                                                anchors.left:   parent.left
+                                                                anchors.right:  parent.right
+                                                                anchors.bottom: parent.bottom
+                                                                height: Math.max(1, Math.round(3 * cpuSide.parent.sc))
+                                                                radius: height / 2
+                                                                color:  Qt.rgba(
+                                                                    Qt.color(root.arcColor(root.sysCpuPct)).r,
+                                                                    Qt.color(root.arcColor(root.sysCpuPct)).g,
+                                                                    Qt.color(root.arcColor(root.sysCpuPct)).b,
+                                                                    0.18)
+
+                                                                Rectangle {
+                                                                    anchors.left:   parent.left
+                                                                    anchors.top:    parent.top
+                                                                    anchors.bottom: parent.bottom
+                                                                    width:  Math.max(radius * 2, parent.width * (root.sysCpuPct / 100))
+                                                                    radius: parent.radius
+                                                                    color:  Qt.color(root.arcColor(root.sysCpuPct))
+                                                                    Behavior on width { SmoothedAnimation { duration: 400; velocity: -1 } }
+                                                                    Behavior on color { ColorAnimation    { duration: 300 } }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+
+                                                    // ── RAM side (bar+label left, icon right) ── mirrored
+                                                    Item {
+                                                        id: ramSide
+                                                        anchors.right:  parent.right
+                                                        anchors.top:    parent.top
+                                                        anchors.bottom: parent.bottom
+                                                        anchors.left:   parent.horizontalCenter
+                                                        anchors.leftMargin: Math.round(3 * parent.sc)
+
+                                                        // Big RAM icon, vertically centred on right edge
+                                                        Text {
+                                                            id: ramIcon
+                                                            anchors.right:          parent.right
+                                                            anchors.verticalCenter: parent.verticalCenter
+                                                            text:  "󰑭"
+                                                            color: Qt.color(root.arcColor(root.sysRamPct))
+                                                            font.pixelSize: Math.round(18 * ramSide.parent.sc)
+                                                            font.family:    root.fontFamily
+                                                            Behavior on color { ColorAnimation { duration: 300 } }
+                                                        }
+
+                                                        // Bar + label stacked, to the left of the icon
+                                                        Item {
+                                                            anchors.right:          ramIcon.left
+                                                            anchors.rightMargin:    Math.round(4 * ramSide.parent.sc)
+                                                            anchors.left:           parent.left
+                                                            anchors.verticalCenter: parent.verticalCenter
+                                                            height: Math.round(20 * ramSide.parent.sc)
+
+                                                            // % number above bar, right-aligned to mirror CPU
+                                                            Text {
+                                                                id: ramLabel
+                                                                anchors.bottom:       ramTrack.top
+                                                                anchors.bottomMargin: Math.round(2 * ramSide.parent.sc)
+                                                                anchors.right:        parent.right
+                                                                text:  root.sysRamPct + "%"
+                                                                color: Qt.color(root.arcColor(root.sysRamPct))
+                                                                font.pixelSize: Math.round(8 * ramSide.parent.sc)
+                                                                font.family:    root.fontFamily
+                                                                font.weight:    Font.Medium
+                                                                Behavior on color { ColorAnimation { duration: 300 } }
+                                                            }
+
+                                                            // Track
+                                                            Rectangle {
+                                                                id: ramTrack
+                                                                anchors.left:   parent.left
+                                                                anchors.right:  parent.right
+                                                                anchors.bottom: parent.bottom
+                                                                height: Math.max(1, Math.round(3 * ramSide.parent.sc))
+                                                                radius: height / 2
+                                                                color:  Qt.rgba(
+                                                                    Qt.color(root.arcColor(root.sysRamPct)).r,
+                                                                    Qt.color(root.arcColor(root.sysRamPct)).g,
+                                                                    Qt.color(root.arcColor(root.sysRamPct)).b,
+                                                                    0.18)
+
+                                                                // Fill grows from right to left to mirror CPU
+                                                                Rectangle {
+                                                                    anchors.right:  parent.right
+                                                                    anchors.top:    parent.top
+                                                                    anchors.bottom: parent.bottom
+                                                                    width:  Math.max(radius * 2, parent.width * (root.sysRamPct / 100))
+                                                                    radius: parent.radius
+                                                                    color:  Qt.color(root.arcColor(root.sysRamPct))
+                                                                    Behavior on width { SmoothedAnimation { duration: 400; velocity: -1 } }
+                                                                    Behavior on color { ColorAnimation    { duration: 300 } }
+                                                                }
+                                                            }
                                                         }
                                                     }
                                                 }
@@ -1501,8 +1961,10 @@ ShellRoot {
                             onActiveChanged: {
                                 if (!active) {
                                     var dy = centroid.position.y - centroid.pressPosition.y
-                                    if (dy > 40)
-                                        root.doClickAction(root.dragDown)
+                                    if (dy > 40) {
+                                        var isRightHalf = centroid.pressPosition.x > (defaultView.width / 2)
+                                        root.doClickAction(isRightHalf ? root.dragDownRight : root.dragDown)
+                                    }
                                 }
                             }
                         }
@@ -1511,6 +1973,7 @@ ShellRoot {
                             acceptedButtons: Qt.LeftButton
                             onTapped: root.doClickAction(root.clickLeft)
                         }
+
                     }
 
                     Item {
@@ -2418,8 +2881,7 @@ ShellRoot {
                                         onClicked: {
                                             root.controlPanelOpen = false
                                             root.islandState = "default"
-                                            screenshotProc.running = false
-                                            screenshotProc.running = true
+                                            screenshotDelayTimer.restart()
                                         }
                                     }
                                 }
@@ -2640,7 +3102,7 @@ ShellRoot {
                                 }
                             }
 
-                            RowLayout {
+                            ColumnLayout {
                                 Layout.fillWidth: true
                                 spacing: 8
                                 visible: pillWrapper.silenceHandleOpen || silenceHideTimer.running
@@ -2656,105 +3118,196 @@ ShellRoot {
                                     if (!pillWrapper.silenceHandleOpen) silenceHideTimer.start()
                                 }
 
-                                Rectangle {
+                                // Silence + VPN side by side
+                                RowLayout {
                                     Layout.fillWidth: true
-                                    height: 52
-                                    radius: 14
-                                    color: root.silenced
-                                           ? Qt.rgba(1, 0.55, 0.26, 0.22)
-                                           : root.tc(0.07)
-                                    Behavior on color { ColorAnimation { duration: 150 } }
+                                    spacing: 8
 
-                                    RowLayout {
-                                        anchors.fill: parent
-                                        anchors.leftMargin: 12
-                                        anchors.rightMargin: 12
-                                        spacing: 10
+                                    Rectangle {
+                                        Layout.fillWidth: true
+                                        height: 52
+                                        radius: 14
+                                        color: root.silenced
+                                               ? Qt.rgba(1, 0.55, 0.26, 0.22)
+                                               : root.tc(0.07)
+                                        Behavior on color { ColorAnimation { duration: 150 } }
 
-                                        Text {
-                                            text: root.silenced ? "󰂛" : "󰂜"
-                                            color: root.silenced ? "#FF8C42" : root.tc(0.75)
-                                            font.pixelSize: 18; font.family: root.fontFamily
-                                            Behavior on color { ColorAnimation { duration: 150 } }
-                                        }
+                                        RowLayout {
+                                            anchors.fill: parent
+                                            anchors.leftMargin: 12
+                                            anchors.rightMargin: 12
+                                            spacing: 10
 
-                                        ColumnLayout {
-                                            Layout.fillWidth: true
-                                            spacing: 1
                                             Text {
-                                                text: root.silenced ? "Silenced" : "Silence"
-                                                color: root.silenced ? "#FF8C42" : root.textColor
-                                                font.pixelSize: 12; font.family: root.fontFamily
-                                                font.weight: Font.Medium
+                                                text: root.silenced ? "󰂛" : "󰂜"
+                                                color: root.silenced ? "#FF8C42" : root.tc(0.75)
+                                                font.pixelSize: 18; font.family: root.fontFamily
                                                 Behavior on color { ColorAnimation { duration: 150 } }
                                             }
-                                            Text {
-                                                text: root.silenced ? "Suppressed" : "Notifications"
-                                                color: root.tc(0.38)
-                                                font.pixelSize: 10; font.family: root.fontFamily
+
+                                            ColumnLayout {
+                                                Layout.fillWidth: true
+                                                spacing: 1
+                                                Text {
+                                                    text: root.silenced ? "Silenced" : "Silence"
+                                                    color: root.silenced ? "#FF8C42" : root.textColor
+                                                    font.pixelSize: 12; font.family: root.fontFamily
+                                                    font.weight: Font.Medium
+                                                    Behavior on color { ColorAnimation { duration: 150 } }
+                                                }
+                                                Text {
+                                                    text: root.silenced ? "Suppressed" : "Notifications"
+                                                    color: root.tc(0.38)
+                                                    font.pixelSize: 10; font.family: root.fontFamily
+                                                }
                                             }
+                                        }
+
+                                        MouseArea {
+                                            anchors.fill: parent
+                                            onClicked: root.silenced = !root.silenced
                                         }
                                     }
 
-                                    MouseArea {
-                                        anchors.fill: parent
-                                        onClicked: root.silenced = !root.silenced
+                                    Rectangle {
+                                        Layout.fillWidth: true
+                                        height: 52
+                                        radius: 14
+                                        color: root.vpnLocationsOpen
+                                               ? root.tc(0.14)
+                                               : root.vpnConnected
+                                                 ? Qt.rgba(0.18, 0.78, 0.45, 0.22)
+                                                 : root.tc(0.07)
+                                        Behavior on color { ColorAnimation { duration: 150 } }
+
+                                        RowLayout {
+                                            anchors.fill: parent
+                                            anchors.leftMargin: 12
+                                            anchors.rightMargin: 12
+                                            spacing: 10
+
+                                            Text {
+                                                text: root.vpnConnected ? "󰦝" : "󰦞"
+                                                color: root.vpnConnected ? "#2EC86E" : root.tc(0.75)
+                                                font.pixelSize: 18; font.family: root.fontFamily
+                                                Behavior on color { ColorAnimation { duration: 150 } }
+                                            }
+
+                                            ColumnLayout {
+                                                Layout.fillWidth: true
+                                                spacing: 1
+                                                Text {
+                                                    text: root.vpnConnected ? "Connected" : "Mullvad"
+                                                    color: root.vpnConnected ? "#2EC86E" : root.textColor
+                                                    font.pixelSize: 12; font.family: root.fontFamily
+                                                    font.weight: Font.Medium
+                                                    Behavior on color { ColorAnimation { duration: 150 } }
+                                                }
+                                                Text {
+                                                    text: root.vpnConnected
+                                                          ? (root.vpnLocation !== "" ? root.vpnLocation : "VPN on")
+                                                          : "Hold to pick location"
+                                                    color: root.tc(0.38)
+                                                    font.pixelSize: 10; font.family: root.fontFamily
+                                                }
+                                            }
+
+                                            // Arrow indicating panel is openable
+                                            Text {
+                                                text: "›"
+                                                color: root.vpnLocationsOpen ? root.tc(0.7) : root.tc(0.25)
+                                                font.pixelSize: 16; font.family: root.fontFamily
+                                                Behavior on color { ColorAnimation { duration: 150 } }
+                                            }
+                                        }
+
+                                        // Single handler: short press = connect/disconnect, long press = location picker
+                                        MouseArea {
+                                            anchors.fill: parent
+
+                                            Timer {
+                                                id: vpnLongPressTimer
+                                                interval: 500
+                                                repeat: false
+                                                onTriggered: {
+                                                    root.vpnLongDidFire = true
+                                                    if (!root.vpnLocationsOpen) {
+                                                        vpnLocationModel.clear()
+                                                        vpnLocationLoader.running = false
+                                                        vpnLocationLoader.running = true
+                                                    }
+                                                    root.vpnLocationsOpen = !root.vpnLocationsOpen
+                                                }
+                                            }
+
+                                            onPressed:  { root.vpnLongDidFire = false; vpnLongPressTimer.restart() }
+                                            onReleased: {
+                                                vpnLongPressTimer.stop()
+                                                if (!root.vpnLongDidFire) {
+                                                    if (root.vpnConnected) {
+                                                        vpnDisconnectProc.running = false
+                                                        vpnDisconnectProc.running = true
+                                                        root.vpnConnected = false
+                                                        root.vpnLocation  = ""
+                                                    } else {
+                                                        vpnConnectProc.running = false
+                                                        vpnConnectProc.running = true
+                                                        root.vpnConnected = true
+                                                    }
+                                                }
+                                            }
+                                            onCanceled: vpnLongPressTimer.stop()
+                                        }
                                     }
                                 }
 
+                                // ── Settings button — full width, below Silence + VPN ──
                                 Rectangle {
                                     Layout.fillWidth: true
                                     height: 52
                                     radius: 14
-                                    color: root.vpnConnected
-                                           ? Qt.rgba(0.18, 0.78, 0.45, 0.22)
-                                           : root.tc(0.07)
+                                    color: root.islandState === "settings" ? root.tc(0.14) : root.tc(0.07)
                                     Behavior on color { ColorAnimation { duration: 150 } }
 
                                     RowLayout {
                                         anchors.fill: parent
-                                        anchors.leftMargin: 12
-                                        anchors.rightMargin: 12
+                                        anchors.leftMargin: 14
+                                        anchors.rightMargin: 14
                                         spacing: 10
 
                                         Text {
-                                            text: root.vpnConnected ? "󰦝" : "󰦞"
-                                            color: root.vpnConnected ? "#2EC86E" : root.tc(0.75)
-                                            font.pixelSize: 18; font.family: root.fontFamily
-                                            Behavior on color { ColorAnimation { duration: 150 } }
+                                            text: "⚙"
+                                            color: root.tc(0.75)
+                                            font.pixelSize: 17; font.family: root.fontFamily
                                         }
 
                                         ColumnLayout {
                                             Layout.fillWidth: true
                                             spacing: 1
                                             Text {
-                                                text: root.vpnConnected ? "Connected" : "Mullvad"
-                                                color: root.vpnConnected ? "#2EC86E" : root.textColor
+                                                text: "Settings"
+                                                color: root.textColor
                                                 font.pixelSize: 12; font.family: root.fontFamily
                                                 font.weight: Font.Medium
-                                                Behavior on color { ColorAnimation { duration: 150 } }
                                             }
                                             Text {
-                                                text: root.vpnConnected ? "VPN on" : "VPN off"
+                                                text: "Appearance & bindings"
                                                 color: root.tc(0.38)
                                                 font.pixelSize: 10; font.family: root.fontFamily
                                             }
+                                        }
+
+                                        Text {
+                                            text: "›"
+                                            color: root.tc(0.35)
+                                            font.pixelSize: 18; font.family: root.fontFamily
                                         }
                                     }
 
                                     MouseArea {
                                         anchors.fill: parent
-                                        onClicked: {
-                                            if (root.vpnConnected) {
-                                                vpnDisconnectProc.running = false
-                                                vpnDisconnectProc.running = true
-                                                root.vpnConnected = false
-                                            } else {
-                                                vpnConnectProc.running = false
-                                                vpnConnectProc.running = true
-                                                root.vpnConnected = true
-                                            }
-                                        }
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: root.islandState = "settings"
                                     }
                                 }
                             }
@@ -3057,6 +3610,787 @@ ShellRoot {
                             }
                         }
                     }
+
+                    // ── Screen Time Panel ─────────────────────────────────────────
+                    Item {
+                        anchors.fill: parent
+                        opacity: root.islandState === "screenTime" ? 1 : 0
+                        visible: opacity > 0
+                        clip: true
+                        Behavior on opacity { NumberAnimation { duration: 150 } }
+
+                        onVisibleChanged: {
+                            if (visible) root.refreshPlaytimeModel()
+                        }
+
+                        TapHandler {
+                            onTapped: {
+                                root.saveScreentimeData()
+                                root.islandState = "default"
+                                root.screenTimeOpen = false
+                            }
+                        }
+
+                        ColumnLayout {
+                            anchors.fill: parent
+                            anchors.topMargin: 0
+                            anchors.leftMargin: 0
+                            anchors.rightMargin: 0
+                            anchors.bottomMargin: 10
+                            spacing: 0
+
+                            // ── Header ─────────────────────────────────────────────
+                            Item {
+                                Layout.fillWidth: true
+                                height: 52
+
+                                Rectangle {
+                                    anchors.top: parent.top
+                                    anchors.topMargin: 8
+                                    anchors.horizontalCenter: parent.horizontalCenter
+                                    width: 36; height: 4; radius: 2
+                                    color: root.tc(0.25)
+                                }
+
+                                RowLayout {
+                                    anchors.fill: parent
+                                    anchors.topMargin: 16
+                                    anchors.leftMargin: 14
+                                    anchors.rightMargin: 12
+                                    anchors.bottomMargin: 6
+                                    spacing: 8
+
+                                    Text {
+                                        text: "⏱"
+                                        color: root.tc(0.55)
+                                        font.pixelSize: 14; font.family: root.fontFamily
+                                    }
+
+                                    Text {
+                                        text: "Screen Time"
+                                        color: root.textColor
+                                        font.pixelSize: 14; font.family: root.fontFamily
+                                        font.weight: Font.SemiBold
+                                        Layout.fillWidth: true
+                                    }
+
+                                    // Sort toggle
+                                    Rectangle {
+                                        width: 68; height: 24; radius: 12
+                                        color: root.tc(0.1)
+                                        RowLayout {
+                                            anchors.fill: parent
+                                            anchors.margins: 2
+                                            spacing: 0
+                                            Rectangle {
+                                                Layout.fillWidth: true; height: parent.height
+                                                radius: 10
+                                                color: root.screenTimeSort === "session" ? root.tc(0.25) : "transparent"
+                                                Behavior on color { ColorAnimation { duration: 120 } }
+                                                Text {
+                                                    anchors.centerIn: parent
+                                                    text: "Now"
+                                                    color: root.screenTimeSort === "session" ? root.textColor : root.tc(0.45)
+                                                    font.pixelSize: 9; font.family: root.fontFamily
+                                                    font.weight: Font.Medium
+                                                }
+                                                MouseArea {
+                                                    anchors.fill: parent
+                                                    onClicked: {
+                                                        root.screenTimeSort = "session"
+                                                        root.refreshPlaytimeModel()
+                                                    }
+                                                }
+                                            }
+                                            Rectangle {
+                                                Layout.fillWidth: true; height: parent.height
+                                                radius: 10
+                                                color: root.screenTimeSort === "total" ? root.tc(0.25) : "transparent"
+                                                Behavior on color { ColorAnimation { duration: 120 } }
+                                                Text {
+                                                    anchors.centerIn: parent
+                                                    text: "All"
+                                                    color: root.screenTimeSort === "total" ? root.textColor : root.tc(0.45)
+                                                    font.pixelSize: 9; font.family: root.fontFamily
+                                                    font.weight: Font.Medium
+                                                }
+                                                MouseArea {
+                                                    anchors.fill: parent
+                                                    onClicked: {
+                                                        root.screenTimeSort = "total"
+                                                        root.refreshPlaytimeModel()
+                                                        root.saveScreentimeData()
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    Text {
+                                        text: "↑"
+                                        color: root.tc(0.35)
+                                        font.pixelSize: 14; font.family: root.fontFamily
+                                        MouseArea {
+                                            anchors.fill: parent
+                                            anchors.margins: -6
+                                            onClicked: {
+                                                root.saveScreentimeData()
+                                                root.islandState = "default"
+                                                root.screenTimeOpen = false
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            Rectangle {
+                                Layout.fillWidth: true
+                                height: 1
+                                color: root.tc(0.07)
+                            }
+
+                            // ── Uptime strip ───────────────────────────────────────
+                            RowLayout {
+                                Layout.fillWidth: true
+                                Layout.preferredHeight: 44
+                                Layout.leftMargin: 14
+                                Layout.rightMargin: 14
+                                spacing: 8
+
+                                ColumnLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 1
+                                    Text {
+                                        text: "PC uptime"
+                                        color: root.tc(0.4)
+                                        font.pixelSize: 9; font.family: root.fontFamily
+                                        font.weight: Font.Medium
+                                    }
+                                    Text {
+                                        text: root.systemUptimeStr
+                                        color: root.textColor
+                                        font.pixelSize: 13; font.family: root.fontFamily
+                                        font.weight: Font.SemiBold
+                                    }
+                                }
+
+                                Rectangle {
+                                    visible: root.screenTimeSort === "total"
+                                    width: 1; height: 28
+                                    color: root.tc(0.1)
+                                }
+
+                                ColumnLayout {
+                                    visible: root.screenTimeSort === "total"
+                                    Layout.fillWidth: true
+                                    spacing: 1
+                                    Text {
+                                        text: "Total ever"
+                                        color: root.tc(0.4)
+                                        font.pixelSize: 9; font.family: root.fontFamily
+                                        font.weight: Font.Medium
+                                    }
+                                    Text {
+                                        text: root.totalPcUptimeStr
+                                        color: root.textColor
+                                        font.pixelSize: 13; font.family: root.fontFamily
+                                        font.weight: Font.SemiBold
+                                    }
+                                }
+
+                                Rectangle {
+                                    width: 1; height: 28
+                                    color: root.tc(0.1)
+                                }
+
+                                // Refresh button
+                                Rectangle {
+                                    width: 28; height: 28; radius: 14
+                                    color: refreshStHover.containsMouse ? root.tc(0.12) : "transparent"
+                                    Behavior on color { ColorAnimation { duration: 100 } }
+                                    HoverHandler { id: refreshStHover }
+                                    Text {
+                                        anchors.centerIn: parent
+                                        text: "↺"
+                                        color: root.tc(0.5)
+                                        font.pixelSize: 14; font.family: root.fontFamily
+                                    }
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        onClicked: root.refreshPlaytimeModel()
+                                    }
+                                }
+                            }
+
+                            Rectangle {
+                                Layout.fillWidth: true
+                                height: 1
+                                color: root.tc(0.07)
+                            }
+
+                            // ── App list ───────────────────────────────────────────
+                            Item {
+                                Layout.fillWidth: true
+                                Layout.fillHeight: true
+                                visible: playtimeModel.count === 0
+
+                                Text {
+                                    anchors.centerIn: parent
+                                    text: "No app usage recorded yet"
+                                    color: root.tc(0.3)
+                                    font.pixelSize: 12; font.family: root.fontFamily
+                                }
+                            }
+
+                            Item {
+                                Layout.fillWidth: true
+                                Layout.fillHeight: true
+                                visible: playtimeModel.count > 0
+
+                                // find max value for bar scaling
+                                property real maxMs: {
+                                    var mx = 1
+                                    for (var i = 0; i < playtimeModel.count; i++) {
+                                        var e = playtimeModel.get(i)
+                                        var v = root.screenTimeSort === "session" ? e.sessionMs : e.totalMs
+                                        if (v > mx) mx = v
+                                    }
+                                    return mx
+                                }
+
+                                ListView {
+                                    id: playtimeList
+                                    anchors.fill: parent
+                                    model: playtimeModel
+                                    clip: true
+                                    spacing: 0
+                                    boundsBehavior: Flickable.StopAtBounds
+
+                                    delegate: Item {
+                                        width: playtimeList.width
+                                        height: 56
+
+                                        required property string appClass
+                                        required property string displayName
+                                        required property real   totalMs
+                                        required property real   sessionMs
+                                        required property string icon
+                                        required property int    index
+
+                                        property real primaryMs:   root.screenTimeSort === "session" ? sessionMs   : totalMs
+                                        property real secondaryMs: root.screenTimeSort === "session" ? totalMs     : sessionMs
+                                        property real barFraction: primaryMs / Math.max(1, playtimeList.parent.maxMs)
+
+                                        HoverHandler { id: ptHover }
+
+                                        Rectangle {
+                                            anchors.fill: parent
+                                            anchors.margins: 3
+                                            anchors.leftMargin: 6
+                                            anchors.rightMargin: 6
+                                            radius: 10
+                                            color: root.tc(ptHover.containsMouse ? 0.07 : 0)
+                                            Behavior on color { ColorAnimation { duration: 80 } }
+                                        }
+
+                                        RowLayout {
+                                            anchors.fill: parent
+                                            anchors.leftMargin: 12
+                                            anchors.rightMargin: 12
+                                            anchors.topMargin: 8
+                                            anchors.bottomMargin: 8
+                                            spacing: 10
+
+                                            // App icon
+                                            Item {
+                                                width: 32; height: 32
+                                                Layout.alignment: Qt.AlignVCenter
+
+                                                Rectangle {
+                                                    anchors.fill: parent; radius: 8
+                                                    color: root.tc(0.08)
+                                                }
+
+                                                Image {
+                                                    id: appIcon
+                                                    anchors.fill: parent
+                                                    anchors.margins: 4
+                                                    source: {
+                                                        var ic = icon
+                                                        if (!ic || ic === "") return ""
+                                                        if (ic.startsWith("/")) return "file://" + ic
+                                                        if (ic.startsWith("file://")) return ic
+                                                        return "image://theme/" + ic
+                                                    }
+                                                    fillMode: Image.PreserveAspectFit
+                                                    smooth: true; mipmap: true; cache: false
+                                                    visible: source !== "" && status === Image.Ready
+                                                }
+
+                                                Text {
+                                                    anchors.centerIn: parent
+                                                    text: appClass.length > 0 ? appClass[0].toUpperCase() : "?"
+                                                    color: root.textColor
+                                                    font.pixelSize: 14; font.family: root.fontFamily
+                                                    font.weight: Font.Bold
+                                                    visible: icon === "" || appIcon.status !== Image.Ready
+                                                }
+                                            }
+
+                                            // Name + bar
+                                            ColumnLayout {
+                                                Layout.fillWidth: true
+                                                Layout.alignment: Qt.AlignVCenter
+                                                spacing: 4
+
+                                                RowLayout {
+                                                    Layout.fillWidth: true
+                                                    spacing: 4
+
+                                                    Text {
+                                                        text: displayName
+                                                        color: root.textColor
+                                                        font.pixelSize: 11; font.family: root.fontFamily
+                                                        font.weight: Font.Medium
+                                                        elide: Text.ElideRight
+                                                        Layout.fillWidth: true
+                                                    }
+
+                                                    Text {
+                                                        text: root.fmtDuration(primaryMs)
+                                                        color: root.textColor
+                                                        font.pixelSize: 12; font.family: root.fontFamily
+                                                        font.weight: Font.SemiBold
+                                                    }
+                                                }
+
+                                                // Bar
+                                                Item {
+                                                    Layout.fillWidth: true
+                                                    height: 5
+
+                                                    Rectangle {
+                                                        anchors.fill: parent; radius: 3
+                                                        color: root.tc(0.1)
+                                                    }
+                                                    Rectangle {
+                                                        width: parent.width * barFraction
+                                                        height: parent.height; radius: 3
+                                                        color: root.accentColor
+                                                        Behavior on width { SmoothedAnimation { duration: 200 } }
+                                                    }
+                                                }
+
+                                                // Secondary label
+                                                Text {
+                                                    text: root.screenTimeSort === "session"
+                                                          ? ("Total: " + root.fmtDuration(secondaryMs))
+                                                          : ("Session: " + root.fmtDuration(secondaryMs))
+                                                    color: root.tc(0.35)
+                                                    font.pixelSize: 9; font.family: root.fontFamily
+                                                }
+                                            }
+                                        }
+
+                                        Rectangle {
+                                            anchors.bottom: parent.bottom
+                                            anchors.left: parent.left; anchors.right: parent.right
+                                            anchors.leftMargin: 12; anchors.rightMargin: 12
+                                            height: 1; color: root.tc(0.05)
+                                            visible: index < playtimeModel.count - 1
+                                        }
+                                    }
+                                }
+
+                                // Scrollbar
+                                Rectangle {
+                                    anchors.right: parent.right
+                                    anchors.rightMargin: 3
+                                    anchors.top: parent.top
+                                    anchors.bottom: parent.bottom
+                                    width: 3; radius: 1.5
+                                    color: root.tc(0.18)
+                                    visible: playtimeList.contentHeight > playtimeList.height
+                                    opacity: playtimeList.moving ? 1 : 0.5
+                                    Behavior on opacity { NumberAnimation { duration: 150 } }
+
+                                    Rectangle {
+                                        width: parent.width; radius: parent.radius
+                                        color: root.tc(0.7)
+                                        height: playtimeList.height > 0
+                                            ? Math.max(20, playtimeList.height * playtimeList.height / Math.max(1, playtimeList.contentHeight))
+                                            : 0
+                                        y: playtimeList.contentHeight > playtimeList.height
+                                            ? playtimeList.contentY * (playtimeList.height - height) / (playtimeList.contentHeight - playtimeList.height)
+                                            : 0
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // ── Settings Panel ─────────────────────────────────────────────
+                    Item {
+                        anchors.fill: parent
+                        opacity: root.islandState === "settings" ? 1 : 0
+                        visible: opacity > 0
+                        clip: true
+                        Behavior on opacity { NumberAnimation { duration: 150 } }
+
+                        TapHandler {
+                            onTapped: root.islandState = "controlPanel"
+                        }
+
+                        ColumnLayout {
+                            anchors.fill: parent
+                            anchors.topMargin: 0
+                            anchors.leftMargin: 0
+                            anchors.rightMargin: 0
+                            anchors.bottomMargin: 10
+                            spacing: 0
+
+                            // Header
+                            Item {
+                                Layout.fillWidth: true
+                                height: 52
+
+                                Rectangle {
+                                    anchors.top: parent.top
+                                    anchors.topMargin: 8
+                                    anchors.horizontalCenter: parent.horizontalCenter
+                                    width: 36; height: 4; radius: 2
+                                    color: root.tc(0.25)
+                                }
+
+                                RowLayout {
+                                    anchors.fill: parent
+                                    anchors.topMargin: 16
+                                    anchors.leftMargin: 14
+                                    anchors.rightMargin: 10
+                                    anchors.bottomMargin: 6
+
+                                    Text {
+                                        text: "Settings"
+                                        color: root.textColor
+                                        font.pixelSize: 15; font.weight: Font.SemiBold
+                                        font.family: root.fontFamily
+                                        Layout.fillWidth: true
+                                    }
+
+                                    Rectangle {
+                                        width: 32; height: 32; radius: 10
+                                        color: root.tc(0.07)
+                                        Text {
+                                            anchors.centerIn: parent
+                                            text: "\u00d7"
+                                            color: root.tc(0.5)
+                                            font.pixelSize: 16; font.family: root.fontFamily
+                                        }
+                                        MouseArea {
+                                            anchors.fill: parent
+                                            cursorShape: Qt.PointingHandCursor
+                                            onClicked: root.islandState = "controlPanel"
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Scrollable content
+                            Flickable {
+                                Layout.fillWidth: true
+                                Layout.fillHeight: true
+                                contentHeight: settingsCol.implicitHeight
+                                clip: true
+                                boundsBehavior: Flickable.StopAtBounds
+
+                                ColumnLayout {
+                                    id: settingsCol
+                                    width: parent.width
+                                    anchors.left: parent.left
+                                    anchors.right: parent.right
+                                    anchors.leftMargin: 10
+                                    anchors.rightMargin: 10
+                                    spacing: 8
+
+                                    // ── Theme ──────────────────────────────────────
+                                    Text {
+                                        Layout.topMargin: 4
+                                        text: "THEME"
+                                        color: root.tc(0.38)
+                                        font.pixelSize: 10; font.weight: Font.Medium
+                                        font.family: root.fontFamily
+                                        font.letterSpacing: 1.0
+                                    }
+
+                                    // Pill colour
+                                    Rectangle {
+                                        Layout.fillWidth: true; height: 44; radius: 14
+                                        color: root.tc(0.07)
+                                        RowLayout {
+                                            anchors.fill: parent; anchors.leftMargin: 14; anchors.rightMargin: 14; spacing: 10
+                                            Text { text: "Pill colour"; color: root.textColor; font.pixelSize: 12; font.weight: Font.Medium; font.family: root.fontFamily; Layout.fillWidth: true }
+                                            Rectangle {
+                                                width: 28; height: 28; radius: 8
+                                                color: root.pillColor; border.color: root.tc(0.25); border.width: 1
+                                                MouseArea { anchors.fill: parent; onClicked: { root.colorWheelTarget = "pill"; root.colorWheelOpen = true } }
+                                            }
+                                        }
+                                    }
+
+                                    // Accent colour
+                                    Rectangle {
+                                        Layout.fillWidth: true; height: 44; radius: 14
+                                        color: root.tc(0.07)
+                                        RowLayout {
+                                            anchors.fill: parent; anchors.leftMargin: 14; anchors.rightMargin: 14; spacing: 10
+                                            Text { text: "Accent colour"; color: root.textColor; font.pixelSize: 12; font.weight: Font.Medium; font.family: root.fontFamily; Layout.fillWidth: true }
+                                            Rectangle {
+                                                width: 28; height: 28; radius: 8
+                                                color: root.accentColor; border.color: root.tc(0.25); border.width: 1
+                                                MouseArea { anchors.fill: parent; onClicked: { root.colorWheelTarget = "accent"; root.colorWheelOpen = true } }
+                                            }
+                                        }
+                                    }
+
+                                    // Text colour
+                                    Rectangle {
+                                        Layout.fillWidth: true; height: 44; radius: 14
+                                        color: root.tc(0.07)
+                                        RowLayout {
+                                            anchors.fill: parent; anchors.leftMargin: 14; anchors.rightMargin: 14; spacing: 10
+                                            Text { text: "Text colour"; color: root.textColor; font.pixelSize: 12; font.weight: Font.Medium; font.family: root.fontFamily; Layout.fillWidth: true }
+                                            Rectangle {
+                                                width: 28; height: 28; radius: 8
+                                                color: root.textColor; border.color: root.tc(0.25); border.width: 1
+                                                MouseArea { anchors.fill: parent; onClicked: { root.colorWheelTarget = "text"; root.colorWheelOpen = true } }
+                                            }
+                                        }
+                                    }
+
+                                    // Pill opacity
+                                    Rectangle {
+                                        Layout.fillWidth: true; height: 52; radius: 14
+                                        color: root.tc(0.07)
+
+                                        ColumnLayout {
+                                            anchors.fill: parent
+                                            anchors.leftMargin: 14; anchors.rightMargin: 14
+                                            anchors.topMargin: 8; anchors.bottomMargin: 8
+                                            spacing: 4
+
+                                            RowLayout {
+                                                Layout.fillWidth: true
+                                                Text { text: "Opacity"; color: root.textColor; font.pixelSize: 12; font.weight: Font.Medium; font.family: root.fontFamily; Layout.fillWidth: true }
+                                                Text { text: Math.round(root.pillOpacity * 100) + "%"; color: root.tc(0.4); font.pixelSize: 11; font.family: root.fontFamily }
+                                            }
+
+                                            Rectangle {
+                                                Layout.fillWidth: true; height: 6; radius: 3
+                                                color: root.tc(0.15)
+                                                Rectangle {
+                                                    width: parent.width * root.pillOpacity
+                                                    height: parent.height; radius: parent.radius
+                                                    color: root.accentColor
+                                                    Behavior on width { NumberAnimation { duration: 80 } }
+                                                }
+                                                MouseArea {
+                                                    anchors.fill: parent
+                                                    anchors.margins: -8
+                                                    onPositionChanged: (mouse) => {
+                                                        if (pressed) {
+                                                            var v = Math.max(0.1, Math.min(1.0, mouse.x / width))
+                                                            root.pillOpacity = Math.round(v * 10) / 10
+                                                        }
+                                                    }
+                                                    onReleased: root.saveConfig()
+                                                    onClicked: (mouse) => {
+                                                        var v = Math.max(0.1, Math.min(1.0, mouse.x / width))
+                                                        root.pillOpacity = Math.round(v * 10) / 10
+                                                        root.saveConfig()
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    // Font family
+                                    Rectangle {
+                                        Layout.fillWidth: true; height: 52; radius: 14
+                                        color: root.tc(0.07)
+
+                                        RowLayout {
+                                            anchors.fill: parent
+                                            anchors.leftMargin: 14; anchors.rightMargin: 14
+                                            spacing: 10
+
+                                            Text { text: ""; color: root.tc(0.65); font.pixelSize: 16; font.family: root.fontFamily }
+                                            ColumnLayout {
+                                                Layout.fillWidth: true; spacing: 1
+                                                Text { text: "Font family"; color: root.textColor; font.pixelSize: 12; font.weight: Font.Medium; font.family: root.fontFamily }
+                                                Text { text: "Leave blank for system default"; color: root.tc(0.35); font.pixelSize: 10; font.family: root.fontFamily }
+                                            }
+                                            Rectangle {
+                                                width: 110; height: 30; radius: 9
+                                                color: root.tc(0.12)
+                                                TextInput {
+                                                    id: fontFamilyInput
+                                                    anchors.fill: parent
+                                                    anchors.leftMargin: 8; anchors.rightMargin: 8
+                                                    verticalAlignment: TextInput.AlignVCenter
+                                                    text: root.fontFamily
+                                                    color: root.textColor
+                                                    font.pixelSize: 11
+                                                    selectByMouse: true
+                                                    onEditingFinished: {
+                                                        root.fontFamily = text.trim()
+                                                        root.saveConfig()
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    // ── Notch Layout ───────────────────────────────
+                                    Text {
+                                        Layout.topMargin: 8
+                                        text: "NOTCH LAYOUT"
+                                        color: root.tc(0.38)
+                                        font.pixelSize: 10; font.weight: Font.Medium
+                                        font.family: root.fontFamily
+                                        font.letterSpacing: 1.0
+                                    }
+
+                                    Rectangle {
+                                        Layout.fillWidth: true
+                                        implicitHeight: notchLayoutEdit.implicitHeight + 24
+                                        radius: 14
+                                        color: root.tc(0.07)
+
+                                        TextEdit {
+                                            id: notchLayoutEdit
+                                            anchors.left: parent.left; anchors.right: parent.right
+                                            anchors.top: parent.top
+                                            anchors.margins: 12
+                                            color: root.textColor
+                                            font.pixelSize: 11; font.family: "monospace"
+                                            wrapMode: TextEdit.Wrap
+                                            selectByMouse: true
+                                            selectedTextColor: "#000000"
+                                            selectionColor: root.tc(0.5)
+
+                                            text: root.notchLayoutRaw
+
+                                            onEditingFinished: {
+                                                var raw = text
+                                                var layout = []
+                                                var ls = raw.split("\n")
+                                                for (var i = 0; i < ls.length; i++) {
+                                                    var line = ls[i].trim()
+                                                    if (line === "" || line[0] === "#") continue
+                                                    var m = line.match(/\[([^\]]*)\]/)
+                                                    if (!m) continue
+                                                    var widgets = m[1].split(",").map(function(s) { return s.trim() }).filter(function(s) { return s !== "" })
+                                                    if (widgets.length > 0) layout.push(widgets)
+                                                }
+                                                if (layout.length > 0) {
+                                                    root.notchLayoutRaw = raw
+                                                    root.notchLayout = layout
+                                                    root.saveNotchLayout(raw)
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    Text {
+                                        Layout.fillWidth: true
+                                        text: "Widgets: Date, Time, Cava, Workspaces, Timer, SysOverview — one line per notch page"
+                                        color: root.tc(0.28)
+                                        font.pixelSize: 9; font.family: root.fontFamily
+                                        wrapMode: Text.WordWrap
+                                    }
+
+                                    // ── Interactions ───────────────────────────────
+                                    Text {
+                                        Layout.topMargin: 8
+                                        text: "INTERACTIONS"
+                                        color: root.tc(0.38)
+                                        font.pixelSize: 10; font.weight: Font.Medium
+                                        font.family: root.fontFamily
+                                        font.letterSpacing: 1.0
+                                    }
+
+                                    Repeater {
+                                        model: [
+                                            { label: "clickLeft",     sub: "Left-click on island"   },
+                                            { label: "clickRight",    sub: "Right-click on island"  },
+                                            { label: "clickMiddle",   sub: "Middle-click on island" },
+                                            { label: "dragDown",      sub: "Drag down from island"  },
+                                            { label: "dragDownRight", sub: "Drag down-right"        },
+                                        ]
+                                        delegate: Rectangle {
+                                            id: bRow
+                                            required property var modelData
+                                            Layout.fillWidth: true; height: 52; radius: 14
+                                            color: root.tc(0.07)
+
+                                            RowLayout {
+                                                anchors.fill: parent
+                                                anchors.leftMargin: 14; anchors.rightMargin: 14
+                                                spacing: 10
+
+                                                Text {
+                                                    text: bRow.modelData.label
+                                                    color: root.tc(0.45)
+                                                    font.pixelSize: 10; font.family: "monospace"
+                                                    Layout.minimumWidth: 110
+                                                }
+
+                                                Rectangle {
+                                                    Layout.fillWidth: true
+                                                    height: 30; radius: 9
+                                                    color: root.tc(0.12)
+
+                                                    TextInput {
+                                                        anchors.fill: parent
+                                                        anchors.leftMargin: 8; anchors.rightMargin: 8
+                                                        verticalAlignment: TextInput.AlignVCenter
+                                                        color: root.textColor
+                                                        font.pixelSize: 11; font.family: "monospace"
+                                                        selectByMouse: true
+                                                        selectedTextColor: "#000000"
+                                                        selectionColor: root.tc(0.5)
+
+                                                        text: {
+                                                            var p = bRow.modelData.label
+                                                            if      (p === "clickLeft")     return root.clickLeft
+                                                            else if (p === "clickRight")    return root.clickRight
+                                                            else if (p === "clickMiddle")   return root.clickMiddle
+                                                            else if (p === "dragDown")      return root.dragDown
+                                                            else                            return root.dragDownRight
+                                                        }
+
+                                                        onEditingFinished: {
+                                                            var v = text.trim()
+                                                            var p = bRow.modelData.label
+                                                            if      (p === "clickLeft")     root.clickLeft     = v
+                                                            else if (p === "clickRight")    root.clickRight    = v
+                                                            else if (p === "clickMiddle")   root.clickMiddle   = v
+                                                            else if (p === "dragDown")      root.dragDown      = v
+                                                            else                            root.dragDownRight = v
+                                                            root.saveConfig()
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    Item { height: 8 }
+                                }
+                            }
+                        }
+                    }
+
+                    // ── End Screen Time Panel ──────────────────────────────────────
 
                 Item {
                     id: wifiSidePanel
@@ -3403,6 +4737,409 @@ ShellRoot {
                                 }
                             }
                         }
+                    }
+                }
+
+                // ── VPN Location side panel ──────────────────────────────
+                Item {
+                    id: vpnLocationPanel
+                    visible: root.islandState === "controlPanel"
+                    width: 196
+                    height: pillWrapper.controlPanelHeight
+
+                    x: root.vpnLocationsOpen
+                        ? pillWrapper.width + 8
+                        : pillWrapper.width
+                    y: 0
+                    opacity: root.vpnLocationsOpen ? 1 : 0
+
+                    Behavior on x       { NumberAnimation { duration: 220; easing.type: Easing.OutCubic } }
+                    Behavior on opacity { NumberAnimation { duration: 180 } }
+
+                    onVisibleChanged: { if (!visible) root.vpnLocationsOpen = false }
+
+                    Rectangle {
+                        anchors.fill: parent
+                        radius: 22
+                        color: root.pillColor
+                        opacity: root.pillOpacity
+                    }
+
+                    ColumnLayout {
+                        anchors.fill: parent
+                        anchors.margins: 14
+                        spacing: 6
+
+                        // Header
+                        RowLayout {
+                            Layout.fillWidth: true
+                            Text {
+                                text: "‹"
+                                color: root.tc(0.55)
+                                font.pixelSize: 16; font.family: root.fontFamily
+                                MouseArea {
+                                    anchors.fill: parent
+                                    onClicked: root.vpnLocationsOpen = false
+                                }
+                            }
+                            Item { Layout.fillWidth: true }
+                            Text {
+                                text: "Location"
+                                color: root.textColor
+                                font.pixelSize: 12; font.family: root.fontFamily
+                                font.weight: Font.Medium
+                            }
+                        }
+
+                        Rectangle {
+                            Layout.fillWidth: true
+                            height: 1
+                            color: root.tc(0.07)
+                        }
+
+                        Text {
+                            visible: vpnLocationModel.count === 0
+                            text: vpnLocationLoader.running ? "Loading…" : "No locations"
+                            color: root.tc(0.4)
+                            font.pixelSize: 10; font.family: root.fontFamily
+                            Layout.fillWidth: true
+                            wrapMode: Text.WordWrap
+                        }
+
+                        Flickable {
+                            visible: vpnLocationModel.count > 0
+                            Layout.fillWidth: true
+                            Layout.fillHeight: true
+                            clip: true
+                            contentHeight: vpnLocColumn.implicitHeight
+                            boundsBehavior: Flickable.StopAtBounds
+
+                            ColumnLayout {
+                                id: vpnLocColumn
+                                width: parent.width
+                                spacing: 2
+
+                                Repeater {
+                                    model: vpnLocationModel
+                                    delegate: Item {
+                                        required property string locCountry
+                                        required property string locCountryCode
+                                        required property string locCity
+                                        required property string locCityCode
+
+                                        width: vpnLocColumn.width
+                                        height: 44
+
+                                        property bool isCurrent: {
+                                            var loc = root.vpnLocation.toLowerCase()
+                                            return loc.indexOf(locCity.toLowerCase()) >= 0
+                                                || loc.indexOf(locCountry.toLowerCase()) >= 0
+                                        }
+
+                                        HoverHandler { id: locHover }
+
+                                        Rectangle {
+                                            anchors.fill: parent
+                                            radius: 8
+                                            color: isCurrent
+                                                ? Qt.rgba(0.18, 0.78, 0.45, 0.15)
+                                                : root.tc(locHover.containsMouse ? 0.07 : 0)
+                                            Behavior on color { ColorAnimation { duration: 80 } }
+                                        }
+
+                                        RowLayout {
+                                            anchors.fill: parent
+                                            anchors.leftMargin: 6
+                                            anchors.rightMargin: 6
+                                            spacing: 6
+
+                                            ColumnLayout {
+                                                Layout.fillWidth: true
+                                                spacing: 1
+                                                Text {
+                                                    text: locCity
+                                                    color: isCurrent ? "#2EC86E" : root.textColor
+                                                    font.pixelSize: 11; font.family: root.fontFamily
+                                                    font.weight: isCurrent ? Font.SemiBold : Font.Normal
+                                                    elide: Text.ElideRight
+                                                    Layout.fillWidth: true
+                                                    Behavior on color { ColorAnimation { duration: 120 } }
+                                                }
+                                                Text {
+                                                    text: locCountry
+                                                    color: root.tc(0.38)
+                                                    font.pixelSize: 9; font.family: root.fontFamily
+                                                    elide: Text.ElideRight
+                                                    Layout.fillWidth: true
+                                                }
+                                            }
+
+                                            // Active indicator dot
+                                            Rectangle {
+                                                width: 6; height: 6; radius: 3
+                                                color: "#2EC86E"
+                                                visible: isCurrent
+                                            }
+                                        }
+
+                                        MouseArea {
+                                            anchors.fill: parent
+                                            onClicked: {
+                                                vpnLocationSetProc.countryCode = locCountryCode
+                                                vpnLocationSetProc.cityCode    = locCityCode
+                                                vpnLocationSetProc.running = false
+                                                vpnLocationSetProc.running = true
+                                                root.vpnLocationsOpen = false
+                                                // Optimistically update location label
+                                                root.vpnLocation = locCity + ", " + locCountry
+                                            }
+                                        }
+
+                                        Rectangle {
+                                            anchors.bottom: parent.bottom
+                                            anchors.left: parent.left; anchors.right: parent.right
+                                            anchors.leftMargin: 6; anchors.rightMargin: 6
+                                            height: 1
+                                            color: root.tc(0.05)
+                                            visible: index < vpnLocationModel.count - 1
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // ── Colour wheel side panel ──────────────────────────────
+                Item {
+                    id: colorWheelPanel
+                    visible: root.islandState === "settings"
+                    width: 240
+                    height: 300
+
+                    x: root.colorWheelOpen
+                        ? pillWrapper.width + 8
+                        : pillWrapper.width
+                    y: 0
+                    opacity: root.colorWheelOpen ? 1 : 0
+
+                    Behavior on x       { NumberAnimation { duration: 220; easing.type: Easing.OutCubic } }
+                    Behavior on opacity { NumberAnimation { duration: 180 } }
+
+                    // Background pill (matches other panels)
+                    Rectangle {
+                        anchors.fill: parent
+                        radius: 22
+                        color: root.pillColor
+                        opacity: root.pillOpacity
+                    }
+
+                    // HSV state
+                    QtObject {
+                        id: cw
+                        property real hue: 0
+                        property real sat: 0
+                        property real val: 1
+
+                        function load() {
+                            var hex = root.colorWheelTarget === "pill"   ? root.pillColor
+                                    : root.colorWheelTarget === "accent" ? root.accentColor
+                                    : root.textColor
+                            var r = parseInt(hex.slice(1,3),16)/255
+                            var g = parseInt(hex.slice(3,5),16)/255
+                            var b = parseInt(hex.slice(5,7),16)/255
+                            var mx = Math.max(r,g,b), mn = Math.min(r,g,b), d = mx-mn
+                            var h = 0
+                            if (d > 0) {
+                                if      (mx===r) h=((g-b)/d+6)%6
+                                else if (mx===g) h=(b-r)/d+2
+                                else             h=(r-g)/d+4
+                                h/=6
+                            }
+                            hue = h; sat = mx>0?d/mx:0; val = mx
+                        }
+
+                        function toHex() {
+                            var h=hue,s=sat,v=val
+                            var i=Math.floor(h*6),f=h*6-i
+                            var p=v*(1-s),q=v*(1-f*s),t=v*(1-(1-f)*s)
+                            var r,g,b
+                            switch(i%6){case 0:r=v;g=t;b=p;break;case 1:r=q;g=v;b=p;break;
+                                        case 2:r=p;g=v;b=t;break;case 3:r=p;g=q;b=v;break;
+                                        case 4:r=t;g=p;b=v;break;default:r=v;g=p;b=q;break}
+                            function h2(n){var x=Math.round(n*255).toString(16);return x.length<2?"0"+x:x}
+                            return "#"+h2(r)+h2(g)+h2(b)
+                        }
+
+                        function apply() {
+                            var hex = toHex()
+                            if      (root.colorWheelTarget==="pill")   root.pillColor   = hex
+                            else if (root.colorWheelTarget==="accent") root.accentColor = hex
+                            else                                       root.textColor   = hex
+                            root.saveConfig()
+                        }
+                    }
+
+                    // Reload HSV whenever the panel opens or target changes
+                    onVisibleChanged: if (visible && root.colorWheelOpen) cw.load()
+                    Connections {
+                        target: root
+                        function onColorWheelOpenChanged() { if (root.colorWheelOpen) cw.load() }
+                        function onColorWheelTargetChanged() { if (root.colorWheelOpen) cw.load() }
+                    }
+
+                    ColumnLayout {
+                        anchors.fill: parent
+                        anchors.margins: 14
+                        spacing: 12
+
+                        // Header row
+                        RowLayout {
+                            Layout.fillWidth: true
+                            Text {
+                                text: "‹"
+                                color: root.tc(0.55)
+                                font.pixelSize: 16; font.family: root.fontFamily
+                                MouseArea { anchors.fill: parent; onClicked: root.colorWheelOpen = false }
+                            }
+                            Item { Layout.fillWidth: true }
+                            Text {
+                                text: root.colorWheelTarget === "pill"   ? "Pill colour"
+                                    : root.colorWheelTarget === "accent" ? "Accent colour"
+                                    : "Text colour"
+                                color: root.textColor
+                                font.pixelSize: 12; font.family: root.fontFamily
+                                font.weight: Font.Medium
+                            }
+                        }
+
+                        // Hue wheel + SV square
+                        Item {
+                            Layout.alignment: Qt.AlignHCenter
+                            width: 170; height: 170
+
+                            // Hue ring
+                            Repeater {
+                                model: 360
+                                delegate: Rectangle {
+                                    required property int index
+                                    x: 85 - width/2  + 72 * Math.cos((index - 90) * Math.PI / 180)
+                                    y: 85 - height/2 + 72 * Math.sin((index - 90) * Math.PI / 180)
+                                    width: 8; height: 8; radius: 4
+                                    color: Qt.hsva(index / 360, 1, 1, 1)
+                                }
+                            }
+
+                            // Hue ring mouse — z:0, only acts outside the SV square (dist > 44)
+                            MouseArea {
+                                anchors.fill: parent
+                                z: 0
+                                function pickHue(mx, my) {
+                                    var dx = mx - 85, dy = my - 85
+                                    var dist = Math.sqrt(dx*dx + dy*dy)
+                                    if (dist > 44) {
+                                        var angle = Math.atan2(dy, dx) / (2 * Math.PI) + 0.25
+                                        cw.hue = (angle + 1) % 1
+                                        cw.apply()
+                                    }
+                                }
+                                onClicked:         mouse => pickHue(mouse.x, mouse.y)
+                                onPositionChanged: mouse => { if (pressed) pickHue(mouse.x, mouse.y) }
+                            }
+
+                            // Hue handle (above ring mouse, below SV)
+                            Rectangle {
+                                x: 85 - 6 + 72 * Math.cos((cw.hue * 360 - 90) * Math.PI / 180)
+                                y: 85 - 6 + 72 * Math.sin((cw.hue * 360 - 90) * Math.PI / 180)
+                                width: 12; height: 12; radius: 6
+                                color: Qt.hsva(cw.hue, 1, 1, 1)
+                                border.color: "white"; border.width: 2
+                                z: 1
+                            }
+
+                            // SV square — z:2 so its MouseArea wins over the hue ring
+                            Item {
+                                x: 85 - 44; y: 85 - 44; width: 88; height: 88
+                                z: 2
+
+                                Rectangle { anchors.fill: parent; color: Qt.hsva(cw.hue, 0, 0, 1) }
+                                Rectangle {
+                                    anchors.fill: parent
+                                    gradient: Gradient {
+                                        orientation: Gradient.Horizontal
+                                        GradientStop { position: 0.0; color: Qt.rgba(1,1,1,1) }
+                                        GradientStop { position: 1.0; color: Qt.hsva(cw.hue,1,1,1) }
+                                    }
+                                }
+                                Rectangle {
+                                    anchors.fill: parent
+                                    gradient: Gradient {
+                                        GradientStop { position: 0.0; color: Qt.rgba(0,0,0,0) }
+                                        GradientStop { position: 1.0; color: Qt.rgba(0,0,0,1) }
+                                    }
+                                }
+                                // Crosshair
+                                Rectangle {
+                                    x: cw.sat * parent.width - 5
+                                    y: (1 - cw.val) * parent.height - 5
+                                    width: 10; height: 10; radius: 5
+                                    color: "transparent"
+                                    border.color: "white"; border.width: 2
+                                }
+                                MouseArea {
+                                    anchors.fill: parent
+                                    z: 3
+                                    function pick(mx, my) {
+                                        cw.sat = Math.max(0, Math.min(1, mx / width))
+                                        cw.val = Math.max(0, Math.min(1, 1 - my / height))
+                                        cw.apply()
+                                    }
+                                    onClicked:         mouse => pick(mouse.x, mouse.y)
+                                    onPositionChanged: mouse => { if (pressed) pick(mouse.x, mouse.y) }
+                                }
+                            }
+                        }
+
+                        // Hex input row
+                        RowLayout {
+                            Layout.fillWidth: true; spacing: 8
+
+                            Rectangle {
+                                width: 24; height: 24; radius: 7
+                                color: cw.toHex()
+                                border.color: root.tc(0.25); border.width: 1
+                            }
+                            Rectangle {
+                                Layout.fillWidth: true; height: 28; radius: 8
+                                color: root.tc(0.12)
+                                TextInput {
+                                    id: cwHexInput
+                                    anchors.fill: parent
+                                    anchors.leftMargin: 8; anchors.rightMargin: 8
+                                    verticalAlignment: TextInput.AlignVCenter
+                                    text: cw.toHex()
+                                    color: root.textColor
+                                    font.pixelSize: 11; font.family: "monospace"
+                                    selectByMouse: true
+                                    onEditingFinished: {
+                                        var v = text.trim()
+                                        if (/^#[0-9a-fA-F]{6}$/.test(v)) {
+                                            var r=parseInt(v.slice(1,3),16)/255
+                                            var g=parseInt(v.slice(3,5),16)/255
+                                            var b=parseInt(v.slice(5,7),16)/255
+                                            var mx=Math.max(r,g,b),mn=Math.min(r,g,b),d=mx-mn
+                                            var h=0
+                                            if(d>0){if(mx===r)h=((g-b)/d+6)%6;else if(mx===g)h=(b-r)/d+2;else h=(r-g)/d+4;h/=6}
+                                            cw.hue=h; cw.sat=mx>0?d/mx:0; cw.val=mx
+                                            cw.apply()
+                                        } else {
+                                            text = cw.toHex()
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
                     }
                 }
 
