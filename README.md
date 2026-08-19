@@ -1,4 +1,4 @@
-# island
+# Dynamic island
 
 A dynamic island shell for Hyprland, built with [Quickshell](https://quickshell.outfoxxed.me/).
 
