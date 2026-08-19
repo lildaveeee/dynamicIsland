@@ -33,7 +33,7 @@ A dynamic island shell for Hyprland, built with [Quickshell](https://quickshell.
 1. Clone the repository into your Quickshell config directory:
 
 ```
-git clone https://github.com/yourname/island ~/.config/quickshell/island
+git clone https://github.com/lildaveeee/island ~/.config/quickshell/island
 ```
 
 2. Make sure all the scripts in `scripts/` are executable:
